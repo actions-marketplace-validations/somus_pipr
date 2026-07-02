@@ -1,39 +1,41 @@
-import type {
-  Agent,
-  AgentDefinition,
-  AgentTool,
-  ChangeRequestAction,
-  ChecksOptions,
-  CommandOptions,
-  CommentValue,
-  DefaultReviewInput,
-  Markdown,
-  ModelProfile,
-  PiprBuilder,
-  PiprPlugin,
-  PublicationOptions,
-  ReviewEntrypoints,
-  Reviewer,
-  ReviewerOptions,
-  ReviewRecipeOptions,
-  RuntimeLimits,
-  Task,
-  ToolRunOptions,
-} from "./index.js";
+import { z } from "zod";
+import { assertSupportedCommandRestCapture } from "./command-grammar.js";
+import {
+  builtinReadOnlyToolBrand,
+  configFactoryBrand,
+  type InternalPiprConfigFactory,
+} from "./internal-contract.js";
 import { stripCommonIndent } from "./prompt.js";
 import { renderPromptValue } from "./prompt-render.js";
 import type { ReviewResult } from "./review-contract.js";
 import type { RuntimePlan } from "./runtime-contract.js";
 import { jsonSchema, schema, schemas } from "./schema.js";
-
-const configFactoryBrand = Symbol.for("pipr.config.factory");
-const builtinReadOnlyToolBrand = Symbol.for("pipr.builtin.readOnlyTool");
-
-type InternalPiprConfigFactory = {
-  readonly kind: "pipr.config-factory";
-  readonly [configFactoryBrand]: true;
-  build(): RuntimePlan;
-};
+import type { Agent, AgentDefinition, AgentTool, BuiltinToolCatalog } from "./types/agent.js";
+import type {
+  AggregateCheckOptions,
+  AutoResolveOptions,
+  AutoResolveUserRepliesOptions,
+  ChangeRequestAction,
+  ChecksOptions,
+  ModelProfile,
+  PiprConfigOptions,
+  PublicationOptions,
+} from "./types/config.js";
+import type { DiffManifestLimits, RuntimeLimits } from "./types/manifest.js";
+import type { Markdown } from "./types/prompt.js";
+import type {
+  CommandOptions,
+  CommentValue,
+  DefaultReviewInput,
+  PiprBuilder,
+  PiprPlugin,
+  ReviewEntrypoints,
+  Reviewer,
+  ReviewerOptions,
+  ReviewRecipeOptions,
+  Task,
+  ToolRunOptions,
+} from "./types/task.js";
 
 /** Defines a synchronous pipr configuration factory. */
 export function definePipr(configure: (pipr: PiprBuilder) => void): {
@@ -83,7 +85,7 @@ function createBuilder(): { api: PiprBuilder; plan(): RuntimePlan } {
           [builtinReadOnlyToolBrand]: true,
         } as AgentTool,
       ],
-    },
+    } satisfies BuiltinToolCatalog,
     schemas,
     on: {
       changeRequest(options) {
@@ -148,12 +150,10 @@ function createBuilder(): { api: PiprBuilder; plan(): RuntimePlan } {
     },
     review(options) {
       assertKnownReviewRecipeOptions(options);
-      registerReviewRecipe(api, publication, options);
+      registerReviewRecipe(api, options);
     },
     config(options) {
-      if (!options || typeof options !== "object") {
-        throw new Error("pipr.config requires an options object");
-      }
+      assertKnownPiprConfigOptions(options);
       mergePublicationConfig(publication, options.publication);
       checks = mergeConfigField("checks", checks, options.checks);
       limits = mergeLimits(limits, options.limits);
@@ -178,12 +178,6 @@ function createBuilder(): { api: PiprBuilder; plan(): RuntimePlan } {
         parse: options.parse as ((arguments_: Record<string, string>) => unknown) | undefined,
         task: options.task as Task<unknown>,
       });
-    },
-    checks(options) {
-      checks = mergeConfigField("checks", checks, options);
-    },
-    limits(options) {
-      limits = mergeLimits(limits, options);
     },
     use(plugin) {
       return plugin.setup(api);
@@ -271,23 +265,17 @@ function createBuilder(): { api: PiprBuilder; plan(): RuntimePlan } {
   };
 }
 
-function registerReviewRecipe(
-  api: PiprBuilder,
-  publication: RuntimePlan["publication"],
-  options: ReviewRecipeOptions,
-): void {
+function registerReviewRecipe(api: PiprBuilder, options: ReviewRecipeOptions): void {
   const id = options.id;
   const agent = options.reviewer ?? createReviewer(api, reviewRecipeReviewerOptions(options, id));
 
   const task = createReviewRecipeTask(api, id, agent, options);
   registerReviewRecipeEntrypoints(api, task, options);
-  updateReviewRecipePublication(publication, options);
 }
 
 const reviewRecipeOptionKeys = new Set([
   "id",
   "entrypoints",
-  "inlineComments",
   "comment",
   "check",
   "timeout",
@@ -302,6 +290,70 @@ const reviewRecipeOptionKeys = new Set([
 ]);
 
 const reviewRecipeEntrypointKeys = new Set(["changeRequest", "command"]);
+
+const modelProfileConfigSchema: z.ZodType<ModelProfile> = z.custom<ModelProfile>(
+  (value) =>
+    typeof value === "object" &&
+    value !== null &&
+    (value as { kind?: unknown }).kind === "pipr.model" &&
+    typeof (value as { id?: unknown }).id === "string" &&
+    typeof (value as { provider?: unknown }).provider === "string" &&
+    typeof (value as { model?: unknown }).model === "string",
+);
+
+const autoResolveUserRepliesOptionsSchema: z.ZodType<AutoResolveUserRepliesOptions> =
+  z.strictObject({
+    enabled: z.boolean().optional(),
+    respondWhenStillValid: z.boolean().optional(),
+    allowedActors: z.enum(["author-or-write", "write", "any"]).optional(),
+  });
+
+const autoResolveOptionsSchema: z.ZodType<AutoResolveOptions> = z.union([
+  z.literal(false),
+  z.strictObject({
+    enabled: z.boolean().optional(),
+    model: modelProfileConfigSchema.optional(),
+    instructions: z.string().min(1).max(4000).optional(),
+    synchronize: z.boolean().optional(),
+    userReplies: z.union([z.boolean(), autoResolveUserRepliesOptionsSchema]).optional(),
+  }),
+]);
+
+const publicationOptionsSchema: z.ZodType<PublicationOptions> = z.strictObject({
+  maxInlineComments: z.number().int().min(0).max(50).optional(),
+  autoResolve: autoResolveOptionsSchema.optional(),
+});
+
+const aggregateCheckOptionsSchema: z.ZodType<AggregateCheckOptions> = z.union([
+  z.literal(false),
+  z.strictObject({
+    enabled: z.boolean().optional(),
+    name: z.string().min(1).optional(),
+  }),
+]);
+
+const checksOptionsSchema: z.ZodType<ChecksOptions> = z.strictObject({
+  aggregate: aggregateCheckOptionsSchema.optional(),
+});
+
+const diffManifestLimitsSchema: z.ZodType<DiffManifestLimits> = z.strictObject({
+  fullMaxBytes: z.number().int().positive().optional(),
+  fullMaxEstimatedTokens: z.number().int().positive().optional(),
+  condensedMaxBytes: z.number().int().positive().optional(),
+  condensedMaxEstimatedTokens: z.number().int().positive().optional(),
+  toolResponseMaxBytes: z.number().int().positive().optional(),
+});
+
+const runtimeLimitsSchema: z.ZodType<RuntimeLimits> = z.strictObject({
+  timeoutSeconds: z.number().int().positive().max(3600).optional(),
+  diffManifest: diffManifestLimitsSchema.optional(),
+});
+
+const piprConfigOptionsSchema: z.ZodType<PiprConfigOptions> = z.strictObject({
+  publication: publicationOptionsSchema.optional(),
+  checks: checksOptionsSchema.optional(),
+  limits: runtimeLimitsSchema.optional(),
+});
 
 function assertKnownReviewRecipeOptions(options: ReviewRecipeOptions): void {
   const unknownKeys = Object.keys(options).filter((key) => !reviewRecipeOptionKeys.has(key));
@@ -320,6 +372,49 @@ function assertKnownReviewRecipeOptions(options: ReviewRecipeOptions): void {
       );
     }
   }
+}
+
+function assertKnownPiprConfigOptions(options: unknown): asserts options is PiprConfigOptions {
+  const parsed = piprConfigOptionsSchema.safeParse(options);
+  if (!parsed.success) {
+    throw new Error(formatPiprConfigOptionsError(parsed.error));
+  }
+}
+
+function formatPiprConfigOptionsError(error: z.ZodError): string {
+  const unsupportedFields = firstUnsupportedConfigFields(error.issues, []);
+  if (unsupportedFields) {
+    return `${piprConfigLabel(unsupportedFields.path)} received unsupported option fields: ${unsupportedFields.keys.join(
+      ", ",
+    )}`;
+  }
+  return `pipr.config received invalid option value: ${z.prettifyError(error)}`;
+}
+
+function firstUnsupportedConfigFields(
+  issues: readonly z.ZodIssue[],
+  parentPath: readonly PropertyKey[],
+): { path: PropertyKey[]; keys: string[] } | undefined {
+  for (const issue of issues) {
+    const path = [...parentPath, ...issue.path];
+    if (issue.code === "unrecognized_keys") {
+      return { path, keys: issue.keys };
+    }
+    if (issue.code === "invalid_union") {
+      for (const branchIssues of issue.errors) {
+        const unsupportedFields = firstUnsupportedConfigFields(branchIssues, path);
+        if (unsupportedFields) {
+          return unsupportedFields;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function piprConfigLabel(pathSegments: PropertyKey[]): string {
+  const path = pathSegments.join(".");
+  return path ? `pipr.config ${path}` : "pipr.config";
 }
 
 function reviewRecipeReviewerOptions(options: ReviewerOptions, name: string): ReviewerOptions {
@@ -390,16 +485,16 @@ function createReviewRecipeTask(
               change: context.change,
               platform: context.platform,
             })
-          : (options.comment ?? defaultReviewComment(result, options.inlineComments !== false));
+          : (options.comment ?? defaultReviewComment(result));
       await context.comment(source);
     },
   });
 }
 
-function defaultReviewComment(result: ReviewResult, includeInlineFindings: boolean): CommentValue {
+function defaultReviewComment(result: ReviewResult): CommentValue {
   return {
-    main: includeInlineFindings ? defaultReviewMarkdown(result) : result.summary.body,
-    ...(includeInlineFindings ? { inlineFindings: result.inlineFindings } : {}),
+    main: defaultReviewMarkdown(result),
+    inlineFindings: result.inlineFindings,
   };
 }
 
@@ -468,21 +563,6 @@ function reviewStringCommandEntrypoint(entrypoint: string | undefined) {
     pattern: entrypoint ?? "@pipr review",
     options: { permission: "write" as const },
   };
-}
-
-function updateReviewRecipePublication(
-  publication: RuntimePlan["publication"],
-  options: ReviewRecipeOptions,
-): void {
-  const maxInlineComments =
-    options.inlineComments === false ? 0 : (options.inlineComments?.max ?? 5);
-  if (
-    publication.maxInlineComments !== undefined &&
-    publication.maxInlineComments !== maxInlineComments
-  ) {
-    throw new Error("pipr.review inlineComments settings must match across review recipes");
-  }
-  publication.maxInlineComments = maxInlineComments;
 }
 
 function mergePublicationConfig(
@@ -610,30 +690,6 @@ function assertUnique(values: string[], label: string): void {
     }
     seen.add(value);
   }
-}
-
-function assertSupportedCommandRestCapture(pattern: string): void {
-  const parts = pattern.match(/\[[^\]]+\]|[^\s]+/g) ?? [];
-  for (const [index, part] of parts.entries()) {
-    if (part.startsWith("[") && part.endsWith("]")) {
-      const optionalRest = part.slice(1, -1).trim().split(/\s+/).find(isRestCaptureToken);
-      if (optionalRest) {
-        throw new Error(finalRequiredRestCaptureMessage(optionalRest));
-      }
-      continue;
-    }
-    if (isRestCaptureToken(part) && index !== parts.length - 1) {
-      throw new Error(finalRequiredRestCaptureMessage(part));
-    }
-  }
-}
-
-function isRestCaptureToken(value: string): boolean {
-  return /^<[a-z0-9-]+\.\.\.>$/.test(value);
-}
-
-function finalRequiredRestCaptureMessage(token: string): string {
-  return `Rest capture '${token}' must be the final required command pattern token`;
 }
 
 function assertModelIdentity(models: ModelProfile[]): void {
