@@ -34,13 +34,14 @@ describe("initOfficialMinimalProject", () => {
 
     const result = await initOfficialMinimalProject({ rootDir });
     const project = await loadRuntimeProject({ rootDir });
+    const configTs = await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text();
 
     expect(result.created).toEqual(expect.arrayContaining(defaultInitFiles));
     expect(result.created).toEqual(expect.arrayContaining(packageInitFiles));
     expect(result.overwritten).toEqual([]);
-    expect(await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text()).toContain(
-      "pipr.review",
-    );
+    expect(configTs).toContain("pipr.review");
+    expect(configTs).toContain("## Review Result");
+    expect(configTs).toContain("See inline comments in the diff.");
     expect(await Bun.file(path.join(rootDir, ".pipr", "tsconfig.json")).text()).toContain(
       "moduleResolution",
     );
@@ -88,9 +89,7 @@ describe("initOfficialMinimalProject", () => {
     expect(project.kind).toBe("typescript");
     expect(project.settings.config.defaultProvider).toBe("deepseek/deepseek-v4-pro");
     expect(project.settings.config.publication.maxInlineComments).toBe(5);
-    expect(await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text()).toContain(
-      'timeout: "10m"',
-    );
+    expect(configTs).toContain('timeout: "10m"');
   });
 
   it("can initialize only the pipr config files without adapter files", async () => {
@@ -135,6 +134,8 @@ describe("initOfficialMinimalProject", () => {
   });
 
   it("initializes every official recipe and validates the generated config", async () => {
+    expect(supportedOfficialInitRecipes).toContain("rich-review");
+    expect(supportedOfficialInitRecipes).toContain("fix-suggestions");
     expect(listOfficialInitRecipes().map((recipe) => recipe.id)).toEqual([
       ...supportedOfficialInitRecipes,
     ]);
@@ -156,6 +157,73 @@ describe("initOfficialMinimalProject", () => {
       expect(configTs).not.toContain("json(input.manifest");
       expect(configTs).not.toContain("input.manifest");
     }
+  });
+
+  it("initializes the structured review recipe with category and severity metadata", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-rich-review-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: [],
+      recipe: "rich-review",
+      minimal: true,
+    });
+    const project = await loadRuntimeProject({ rootDir });
+    const configTs = await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text();
+
+    expect(configTs).toContain("severity");
+    expect(configTs).toContain("category");
+    expect(configTs).toContain("@pipr review");
+    expect(configTs).toContain('"## Findings"');
+    expect(configTs).not.toContain('"## Review"');
+    expect(configTs).not.toContain("rich-review");
+    expect(inspectRuntimePlan(project.plan, ".pipr/config.ts").agents).toContain("reviewer");
+    expect(inspectRuntimePlan(project.plan, ".pipr/config.ts").tasks).toContain("review");
+  });
+
+  it("initializes the fix suggestions recipe as a command-first exact patch workflow", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-fix-suggestions-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: [],
+      recipe: "fix-suggestions",
+      minimal: true,
+    });
+    const project = await loadRuntimeProject({ rootDir });
+    const configTs = await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text();
+    const inspected = inspectRuntimePlan(project.plan, ".pipr/config.ts");
+
+    expect(configTs).toContain("suggestedFix: z.string().min(1)");
+    expect(configTs).toContain("isPublishableSuggestion");
+    expect(configTs).toContain("isPublishableSuggestedFixSelection");
+    expect(configTs).toContain("suggestionIncludesUnselectedContext");
+    expect(configTs).toContain("@pipr improve");
+    expect(configTs).toContain("maxInlineComments: 6");
+    expect(inspected.agents).toContain("fix-suggestions");
+    expect(inspected.tasks).toContain("fix-suggestions");
+    expect(inspected.commands).toContainEqual({
+      pattern: "@pipr improve",
+      task: "fix-suggestions",
+      permission: "write",
+    });
+  });
+
+  it("initializes the quality gate recipe with commentable blocker filtering", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-quality-gate-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: [],
+      recipe: "quality-gate",
+      minimal: true,
+    });
+    const configTs = await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text();
+
+    expect(configTs).toContain("commentableBlockers");
+    expect(configTs).toContain("commentableRangeForFinding");
+    expect(configTs).toContain("droppedBlockersNote");
+    expect(configTs).not.toContain("if (result.blockers.length > 0)");
   });
 
   it("initializes advanced recipes with inspectable agents, tools, and commands", async () => {
@@ -212,6 +280,22 @@ describe("initOfficialMinimalProject", () => {
         permission: "read",
       },
     ]);
+  });
+
+  it("initializes the PR briefing recipe with dynamic diagram fences", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-pr-briefing-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: [],
+      recipe: "pr-briefing",
+      minimal: true,
+    });
+    const configTs = await Bun.file(path.join(rootDir, ".pipr", "config.ts")).text();
+
+    expect(configTs).toContain("function markdownFenceFor");
+    expect(configTs).toContain("$" + "{fence}mermaid");
+    expect(configTs).not.toContain('"```mermaid",\n    diagram,\n    "```"');
   });
 
   it("adds R2 memory secrets to the plugin recipe workflow", async () => {

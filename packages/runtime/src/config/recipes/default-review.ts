@@ -26,23 +26,36 @@ export default definePipr((pipr) => {
       Return only actionable findings that target valid diff ranges.
     \`,
     timeout: "10m",
-    comment: (result, context) => ({
-      main:
-        context.platform.id === "local"
-          ? [
-              "## Summary",
-              "",
-              result.summary.body,
-              "",
-              "## Inline Findings",
-              "",
-              result.inlineFindings.length === 0
-                ? "No inline findings."
-                : result.inlineFindings.map((finding) => \`- \${finding.body}\`).join("\\n"),
-            ].join("\\n")
-          : result.summary.body,
-      inlineFindings: result.inlineFindings,
-    }),
+    comment: (result, context) => {
+      const inlineFindingSummary =
+        result.inlineFindings.length === 0
+          ? "No inline findings."
+          : "See inline comments in the diff.";
+      const localInlineFindingSummary = [
+        "## Inline Findings",
+        "",
+        result.inlineFindings.length === 0
+          ? "No inline findings."
+          : result.inlineFindings.map((finding) => \`- \${finding.body}\`).join("\\n"),
+      ].join("\\n");
+
+      return {
+        main: [
+          "## Summary",
+          "",
+          result.summary.body,
+          "",
+          "## Review Result",
+          "",
+          "| Signal | Result |",
+          "| --- | ---: |",
+          \`| Inline findings | \${result.inlineFindings.length} |\`,
+          "",
+          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
+        ].join("\\n"),
+        inlineFindings: result.inlineFindings,
+      };
+    },
   });
 });
 `,

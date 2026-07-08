@@ -8,6 +8,8 @@
     "---[MessageSquareText]Review---",
     "default-review",
     "bug-hunter",
+    "rich-review",
+    "fix-suggestions",
     "multi-agent-review",
     "pr-briefing",
     "---[ShieldCheck]Security & Quality---",

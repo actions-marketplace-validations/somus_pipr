@@ -1,5 +1,12 @@
+import type { OfficialInitRecipe } from "./types.js";
+
+export const structuredReviewRecipe = {
+  id: "rich-review",
+  title: "Structured Review",
+  description: "General pull request review with severity and category metadata.",
+  sourceTools: ["CodeRabbit", "Qodo Merge", "Greptile"],
+  configTs: `import { definePipr, z } from "@usepipr/sdk";
 import type { ReviewFinding } from "@usepipr/sdk";
-import { definePipr, z } from "@usepipr/sdk";
 
 type CategorizedFinding = {
   title: string;
@@ -65,7 +72,7 @@ export default definePipr((pipr) => {
   const reviewer = pipr.agent({
     name: "reviewer",
     model,
-    instructions: `
+    instructions: \`
       Review the pull request diff for correctness, security, reliability,
       performance, test coverage, maintainability, and documentation risks.
       Return only actionable findings that target valid diff ranges. Assign
@@ -73,7 +80,7 @@ export default definePipr((pipr) => {
       medium for important follow-up, low for minor actionable improvements,
       and nit only for tiny but concrete issues. Include suggestedFix only when
       there is an exact replacement for the selected range.
-    `,
+    \`,
     output: reviewOutput,
     tools: pipr.tools.readOnly,
     retry: { invalidOutput: 1, transientFailure: 1 },
@@ -90,7 +97,7 @@ export default definePipr((pipr) => {
         const severity = finding.severity.charAt(0).toUpperCase() + finding.severity.slice(1);
         const category = finding.category.replaceAll("-", " ");
         return {
-          body: `**${severity} ${category}:** ${finding.title}. ${finding.body}`,
+          body: \`**\${severity} \${category}:** \${finding.title}. \${finding.body}\`,
           path: finding.path,
           rangeId: finding.rangeId,
           side: finding.side,
@@ -113,7 +120,7 @@ export default definePipr((pipr) => {
           findingRationales(result.findings),
           "",
           "</details>",
-        ].join("\n"),
+        ].join("\\n"),
         inlineFindings,
       });
     },
@@ -129,18 +136,18 @@ function findingsTable(findings: CategorizedFinding[]): string {
       "| Severity | Category | Title |",
       "| --- | --- | --- |",
       "| - | - | No findings. |",
-    ].join("\n");
+    ].join("\\n");
   }
   return [
     "| Severity | Category | Title |",
     "| --- | --- | --- |",
     ...findings.map((finding) => {
       const severity = finding.severity.charAt(0).toUpperCase() + finding.severity.slice(1);
-      const category = finding.category.replaceAll("-", " ").replaceAll("|", "\\|");
-      const title = finding.title.replaceAll("\n", " ").replaceAll("|", "\\|");
-      return `| ${severity} | ${category} | ${title} |`;
+      const category = finding.category.replaceAll("-", " ").replaceAll("|", "\\\\|");
+      const title = finding.title.replaceAll("\\n", " ").replaceAll("|", "\\\\|");
+      return \`| \${severity} | \${category} | \${title} |\`;
     }),
-  ].join("\n");
+  ].join("\\n");
 }
 
 function findingRationales(findings: CategorizedFinding[]): string {
@@ -150,13 +157,15 @@ function findingRationales(findings: CategorizedFinding[]): string {
   return findings
     .map((finding, index) =>
       [
-        `### ${index + 1}. ${finding.title}`,
+        \`### \${index + 1}. \${finding.title}\`,
         "",
-        `**Severity:** ${finding.severity.charAt(0).toUpperCase() + finding.severity.slice(1)}`,
-        `**Category:** ${finding.category.replaceAll("-", " ")}`,
+        \`**Severity:** \${finding.severity.charAt(0).toUpperCase() + finding.severity.slice(1)}\`,
+        \`**Category:** \${finding.category.replaceAll("-", " ")}\`,
         "",
         finding.rationale,
-      ].join("\n"),
+      ].join("\\n"),
     )
-    .join("\n\n");
+    .join("\\n\\n");
 }
+`,
+} as const satisfies OfficialInitRecipe;
