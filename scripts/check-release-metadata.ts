@@ -25,6 +25,10 @@ const selfReviewWorkflow = await readText(".github/workflows/pipr.yml");
 const actionMetadata = await readText("action.yml");
 const bunLock = await readText("bun.lock");
 const releaseVersionExpression = githubExpression("steps.version.outputs.version");
+const releasePushTokenExpression = githubExpression(
+  "secrets.PIPR_RELEASE_PLEASE_TOKEN || github.token",
+);
+const releaseVersionShellVariable = ["${", "PIPR_RELEASE_VERSION", "}"].join("");
 const shaExpression = githubExpression("github.sha");
 const workflowSources = {
   ".github/workflows/ci.yml": ciWorkflow,
@@ -60,11 +64,12 @@ for (const packagePath of ["packages/sdk", "packages/runtime", "packages/cli"]) 
 
 const cliPackage = await readJson<PackageJson>("packages/cli/package.json");
 const selfReviewPackage = await readJson<PackageJson>(".pipr/package.json");
+const selfReviewSdkVersion = selfReviewPackage.dependencies?.["@usepipr/sdk"];
+const selfReviewLock = await readText(".pipr/bun.lock");
 assert.equal(cliPackage.bin?.pipr, "./dist/main.mjs", "@usepipr/cli bin must point at dist");
-assert.equal(
-  selfReviewPackage.dependencies?.["@usepipr/sdk"],
-  rootPackage.version,
-  ".pipr/package.json @usepipr/sdk dependency must match root",
+assert(
+  selfReviewSdkVersion && /^\d+\.\d+\.\d+$/.test(selfReviewSdkVersion),
+  ".pipr/package.json @usepipr/sdk dependency must pin a published stable version",
 );
 assert.equal(
   rootPackage.scripts?.["sync:release-lockfile"],
@@ -90,8 +95,12 @@ assert(
   "bun.lock @usepipr/cli sdk dependency must match root",
 );
 assert(
-  (await readText(".pipr/bun.lock")).includes(`"@usepipr/sdk": "${rootPackage.version}"`),
-  ".pipr/bun.lock @usepipr/sdk dependency must match root",
+  selfReviewLock.includes(`"@usepipr/sdk": "${selfReviewSdkVersion}"`),
+  ".pipr/bun.lock @usepipr/sdk dependency must match .pipr/package.json",
+);
+assert(
+  selfReviewLock.includes(`"@usepipr/sdk@${selfReviewSdkVersion}"`),
+  ".pipr/bun.lock @usepipr/sdk package entry must match .pipr/package.json",
 );
 
 assert(
@@ -183,9 +192,56 @@ assert(
   releaseWorkflow.includes("dist/release/SHA256SUMS"),
   "release workflow must upload SHA256SUMS",
 );
+const dogfoodUpdateStep = "name: Update dogfood SDK on main";
+assert(
+  releaseWorkflow.includes(dogfoodUpdateStep),
+  "release workflow must update dogfood SDK after publish",
+);
+assert(
+  releaseWorkflow.indexOf(dogfoodUpdateStep) > releaseWorkflow.indexOf("name: Publish GHCR image"),
+  "release workflow must update dogfood SDK only after all release artifacts publish",
+);
+assert(
+  releaseWorkflow.includes(`PIPR_PUSH_TOKEN: ${releasePushTokenExpression}`),
+  "release workflow dogfood update must use the release push token fallback",
+);
+assert(
+  releaseWorkflow.includes(`npm view "@usepipr/sdk@${releaseVersionShellVariable}" version`),
+  "release workflow must wait for the published SDK before bumping dogfood",
+);
+assert(
+  releaseWorkflow.includes(
+    'main_version="$(bun -e "console.log((await import(\'./package.json\')).default.version)")"',
+  ),
+  "release workflow dogfood update must read the current main root version",
+);
+assert(
+  releaseWorkflow.includes('[[ "$main_version" != "$PIPR_RELEASE_VERSION" ]]'),
+  "release workflow dogfood update must skip stale release tags",
+);
+assert(
+  releaseWorkflow.includes("bun install --cwd .pipr"),
+  "release workflow must refresh the dogfood lockfile after bumping the SDK",
+);
+assert(
+  releaseWorkflow.includes("bun run check:release-metadata"),
+  "release workflow must validate release metadata before pushing the dogfood bump",
+);
+assert(
+  releaseWorkflow.includes(`chore: update dogfood SDK to ${releaseVersionShellVariable}`),
+  "release workflow must commit a non-release dogfood SDK bump",
+);
+assert(
+  releaseWorkflow.includes('"HEAD:main"'),
+  "release workflow must push the dogfood SDK bump directly to main",
+);
 assert(
   !releasePleaseConfig.includes('"path": "bun.lock"'),
   "Release Please must not use unsupported generic bun.lock updates",
+);
+assert(
+  !releasePleaseConfig.includes('"path": ".pipr/package.json"'),
+  "Release Please must not bump dogfood SDK before packages are published",
 );
 assert(
   !releasePleaseWorkflow.includes("bun install --lockfile-only"),
