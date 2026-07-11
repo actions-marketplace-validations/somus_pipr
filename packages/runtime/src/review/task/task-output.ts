@@ -10,8 +10,11 @@ import type { ReviewResult } from "../../types.js";
 import type { PiRunStats } from "../agent/review-run.js";
 import {
   mainCommentAttributionPattern,
+  mainCommentFooterHiddenMarker,
+  mainCommentHeaderHiddenMarker,
   mainCommentTitles,
   reviewStatsEndMarker,
+  reviewStatsHiddenMarker,
   reviewStatsStartMarker,
 } from "../comment-branding.js";
 import { reviewFindingSchema } from "../contract.js";
@@ -327,18 +330,24 @@ export function priorReviewForTask(
 
 function visibleMainComment(body: string): string {
   const sourceLines = body.split("\n");
-  const statsRange = generatedReviewStatsRange(sourceLines);
-  const lines = sourceLines.filter((line, index) => {
+  const envelope = parseGeneratedMainCommentEnvelope(sourceLines);
+  const lines = sourceLines.filter((_line, index) => {
     return (
-      !(statsRange && index >= statsRange.start && index <= statsRange.end) &&
-      !line.startsWith("<!-- pipr:main-comment ") &&
-      !mainCommentAttributionPattern.test(line)
+      !(
+        envelope.statsRange &&
+        index >= envelope.statsRange.start &&
+        index <= envelope.statsRange.end
+      ) &&
+      index !== envelope.mainMarkerIndex &&
+      index !== envelope.headerMarkerIndex &&
+      index !== envelope.statsMarkerIndex &&
+      index !== envelope.footerIndex
     );
   });
   while (lines[0] === "") {
     lines.shift();
   }
-  if (lines[0] && mainCommentTitles.has(lines[0])) {
+  if (envelope.headerMarkerIndex < 0 && lines[0] && mainCommentTitles.has(lines[0])) {
     lines.shift();
   }
   while (lines[0] === "") {
@@ -347,12 +356,52 @@ function visibleMainComment(body: string): string {
   return lines.join("\n").trim();
 }
 
-function generatedReviewStatsRange(lines: string[]): { start: number; end: number } | undefined {
-  const attributionIndex = lines.findLastIndex((line) => mainCommentAttributionPattern.test(line));
-  if (attributionIndex < 0) {
-    return undefined;
-  }
-  const end = lines.slice(0, attributionIndex).findLastIndex((line) => line !== "");
+type GeneratedMainCommentEnvelope = {
+  mainMarkerIndex: number;
+  headerMarkerIndex: number;
+  statsMarkerIndex: number;
+  statsRange: { start: number; end: number } | undefined;
+  footerIndex: number;
+};
+
+function parseGeneratedMainCommentEnvelope(lines: string[]): GeneratedMainCommentEnvelope {
+  const mainMarkerIndex = lines.findIndex((line) => line.startsWith("<!-- pipr:main-comment "));
+  const headerCandidateOffset = lines.slice(mainMarkerIndex + 1).findIndex((line) => line !== "");
+  const headerCandidateIndex = mainMarkerIndex + 1 + headerCandidateOffset;
+  const headerMarkerIndex =
+    mainMarkerIndex >= 0 &&
+    headerCandidateOffset >= 0 &&
+    lines[headerCandidateIndex] === mainCommentHeaderHiddenMarker
+      ? headerCandidateIndex
+      : -1;
+  const lastLineIndex = lines.findLastIndex((line) => line !== "");
+  const lastLine = lines[lastLineIndex] ?? "";
+  const footerIndex =
+    lastLine === mainCommentFooterHiddenMarker || mainCommentAttributionPattern.test(lastLine)
+      ? lastLineIndex
+      : -1;
+  const lastContentIndex = lines
+    .slice(0, footerIndex < 0 ? lines.length : footerIndex)
+    .findLastIndex((line) => line !== "");
+  const statsMarkerIndex =
+    lines[lastContentIndex] === reviewStatsHiddenMarker ? lastContentIndex : -1;
+
+  return {
+    mainMarkerIndex,
+    headerMarkerIndex,
+    statsMarkerIndex,
+    statsRange: generatedReviewStatsRange(lines, footerIndex),
+    footerIndex,
+  };
+}
+
+function generatedReviewStatsRange(
+  lines: string[],
+  generatedFooterIndex: number,
+): { start: number; end: number } | undefined {
+  const end = lines
+    .slice(0, generatedFooterIndex < 0 ? lines.length : generatedFooterIndex)
+    .findLastIndex((line) => line !== "");
   if (end < 0) {
     return undefined;
   }
