@@ -1,17 +1,15 @@
 import { Database } from "bun:sqlite";
-import { timingSafeEqual } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { z } from "zod";
-import { createGitLabClient } from "../hosts/gitlab/client.js";
+import { createCodeHostWebhookProtocol, type WebhookHost } from "../hosts/webhook.js";
 import type { RuntimeLogSink } from "../shared/logging.js";
 import { redactPotentialSecrets } from "../shared/redaction.js";
 import { runHostRunCommand } from "./commands.js";
 
 const MAX_WEBHOOK_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
-export type WebhookHost = "gitlab";
+export type { WebhookHost } from "../hosts/webhook.js";
 
 export type WebhookDelivery = {
   id: string;
@@ -26,33 +24,32 @@ export type WebhookDeliveryStore = {
   fail(id: string, error: string): void;
 };
 
-type ExpectedGitLabRepository = { id: string; path: string };
-
 export function createWebhookIngress(options: {
   host: WebhookHost;
   secret: string;
-  expectedRepository: ExpectedGitLabRepository;
+  expectedRepository: unknown;
   store: WebhookDeliveryStore;
   maxPayloadBytes?: number;
 }) {
   const maxPayloadBytes = options.maxPayloadBytes ?? MAX_WEBHOOK_PAYLOAD_BYTES;
+  const protocol = createCodeHostWebhookProtocol(options.host);
   return async (request: Request): Promise<Response> => {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    if (!verifyWebhookSecret(request.headers, options.secret)) {
+    if (!protocol.verifySecret(request.headers, options.secret)) {
       return new Response("Unauthorized", { status: 401 });
-    }
-    const id = deliveryId(request.headers, options.host);
-    if (!id) {
-      return new Response("Missing delivery id", { status: 400 });
     }
     const payload = await request.text();
     if (new TextEncoder().encode(payload).byteLength > maxPayloadBytes) {
       return new Response("Payload Too Large", { status: 413 });
     }
-    if (!matchesExpectedGitLabRepository(payload, options.expectedRepository)) {
+    if (!protocol.matchesExpectedRepository(payload, options.expectedRepository)) {
       return new Response("Repository mismatch", { status: 403 });
+    }
+    const id = protocol.deliveryId(request.headers, payload);
+    if (!id) {
+      return new Response("Missing delivery id", { status: 400 });
     }
     const result = options.store.enqueue({ id, host: options.host, payload });
     if (result === "full") {
@@ -129,7 +126,11 @@ export async function runWebhookServer(options: {
 }): Promise<void> {
   await mkdir(path.dirname(path.resolve(options.databasePath)), { recursive: true });
   const env = { ...process.env, ...options.env };
-  const expectedRepository = await createGitLabClient(env).getProject(options.expectedRepository);
+  const protocol = createCodeHostWebhookProtocol(options.host);
+  const expectedRepository = await protocol.resolveExpectedRepository(
+    env,
+    options.expectedRepository,
+  );
   const store = new SqliteWebhookDeliveryStore(options.databasePath);
   const ingress = createWebhookIngress({
     host: options.host,
@@ -328,43 +329,3 @@ const consoleRuntimeLogSink: RuntimeLogSink = {
     return await run();
   },
 };
-
-function verifyWebhookSecret(headers: Headers, secret: string): boolean {
-  const supplied = headers.get("X-Gitlab-Token");
-  if (!supplied) return false;
-  const expectedBytes = Buffer.from(secret);
-  const suppliedBytes = Buffer.from(supplied);
-  return (
-    expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes)
-  );
-}
-
-function deliveryId(headers: Headers, host: WebhookHost): string | undefined {
-  const id = headers.get("X-Gitlab-Webhook-UUID") ?? headers.get("X-Gitlab-Event-UUID");
-  return id ? `${host}:${id}` : undefined;
-}
-
-const gitLabWebhookProjectSchema = z.looseObject({
-  project: z.looseObject({
-    id: z.union([z.number(), z.string()]).transform(String),
-    path_with_namespace: z.string().min(1),
-  }),
-});
-
-function matchesExpectedGitLabRepository(
-  payload: string,
-  expectedRepository: ExpectedGitLabRepository,
-): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payload);
-  } catch {
-    return false;
-  }
-  const event = gitLabWebhookProjectSchema.safeParse(parsed);
-  return (
-    event.success &&
-    event.data.project.id === expectedRepository.id &&
-    event.data.project.path_with_namespace === expectedRepository.path
-  );
-}

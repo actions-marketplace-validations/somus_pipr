@@ -1678,19 +1678,34 @@ export default definePipr((pipr) => {
     expect(await fileExists(path.join(rootDir, ".github", "workflows", "pipr.yml"))).toBe(false);
   });
 
+  it("creates an Azure trusted-runner environment template without a credentialed PR pipeline", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    const result = await initOfficialMinimalProject({
+      rootDir,
+      configDir: "config/pipr",
+      adapters: ["azure-devops"],
+    });
+    const environment = await Bun.file(path.join(rootDir, "azure-devops.pipr.env.example")).text();
+
+    expect(result.created).toContain("azure-devops.pipr.env.example");
+    expect(environment).toContain("AZURE_DEVOPS_BEARER_TOKEN=");
+    expect(environment).toContain("PIPR_AZURE_SUBSCRIPTION_ID=");
+    expect(environment).toContain("PIPR_WEBHOOK_SECRET=");
+    expect(await fileExists(path.join(rootDir, "azure-pipelines.pipr.yml"))).toBe(false);
+  });
+
   it("rejects unsupported init adapters", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
 
-    await expect(
-      initOfficialMinimalProject({ rootDir, adapters: ["azure-devops"] }),
-    ).rejects.toThrow(
-      "Unsupported pipr init adapter 'azure-devops'. Supported adapters: github, gitlab",
+    await expect(initOfficialMinimalProject({ rootDir, adapters: ["bitbucket"] })).rejects.toThrow(
+      "Unsupported pipr init adapter 'bitbucket'. Supported adapters: github, gitlab, azure-devops",
     );
     await expect(
       initOfficialMinimalProject({ rootDir, adapters: ["none", "github"] }),
     ).rejects.toThrow("Adapter 'none' cannot be mixed with other init adapters");
     await expect(initOfficialMinimalProject({ rootDir, adapters: [""] })).rejects.toThrow(
-      "Unsupported pipr init adapter ''. Supported adapters: github, gitlab",
+      "Unsupported pipr init adapter ''. Supported adapters: github, gitlab, azure-devops",
     );
   });
 

@@ -26,7 +26,7 @@ export type InitOfficialMinimalProjectResult = {
   overwritten: string[];
 };
 
-export const supportedOfficialInitAdapters = ["github", "gitlab"] as const;
+export const supportedOfficialInitAdapters = ["github", "gitlab", "azure-devops"] as const;
 
 export type OfficialInitAdapter = (typeof supportedOfficialInitAdapters)[number];
 
@@ -57,10 +57,10 @@ function resolveOfficialInitAdapters(adapters?: readonly string[]): OfficialInit
       }
       return [];
     }
-    if (adapter !== "github" && adapter !== "gitlab") {
+    if (!supportedOfficialInitAdapters.includes(adapter as OfficialInitAdapter)) {
       throw unsupportedAdapterError(adapter);
     }
-    selected.add(adapter);
+    selected.add(adapter as OfficialInitAdapter);
   }
   return [...selected];
 }
@@ -169,6 +169,12 @@ async function starterFiles(
       contents: starterGitLabPipeline(relativeConfigDir.split(path.sep).join("/"), recipe),
     });
   }
+  if (adapters.includes("azure-devops")) {
+    files.push({
+      relativePath: "azure-devops.pipr.env.example",
+      contents: starterAzureDevOpsWebhookEnvironment(recipe),
+    });
+  }
   return files;
 }
 
@@ -188,6 +194,22 @@ function starterGitLabPipeline(relativeConfigDir: string, recipe?: string): stri
   ];
   for (const secret of officialInitRecipeWorkflowEnvSecrets(recipe)) {
     lines.push(`    # Configure ${secret.env} as a masked GitLab CI/CD variable.`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function starterAzureDevOpsWebhookEnvironment(recipe?: string): string {
+  const lines = [
+    "# Copy these names into the trusted webhook runner's secret store.",
+    "AZURE_DEVOPS_ORGANIZATION=",
+    "AZURE_DEVOPS_PROJECT=",
+    "AZURE_DEVOPS_BEARER_TOKEN=",
+    "PIPR_AZURE_SUBSCRIPTION_ID=",
+    "PIPR_WEBHOOK_SECRET=",
+  ];
+  for (const secret of officialInitRecipeWorkflowEnvSecrets(recipe)) {
+    lines.push(`${secret.env}=`);
   }
   lines.push("");
   return lines.join("\n");
