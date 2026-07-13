@@ -11,7 +11,7 @@ GitHub Releases publish compiled CLI binaries for supported platforms.
 The binary exposes these command groups:
 
 - `pipr init`
-- `pipr action`
+- `pipr host-run`
 - `pipr check`
 - `pipr dry-run`
 - `pipr inspect`

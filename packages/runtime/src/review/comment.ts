@@ -89,7 +89,7 @@ const threadActionSchema = z.strictObject({
   kind: z.enum(["resolve", "reply"]),
   findingId: findingIdSchema,
   findingHeadSha: z.string().min(1),
-  commentId: z.number().int().positive(),
+  commentId: z.string().min(1),
   threadId: z.string().min(1).optional(),
   body: z.string().min(1),
   responseKey: z.string().min(1),
@@ -127,6 +127,28 @@ const publicationPlanSchema = z.strictObject({
 });
 
 export type PublicationPlan = z.infer<typeof publicationPlanSchema>;
+
+export function publicationPlanForHostCapabilities(
+  plan: PublicationPlan,
+  capabilities: { multilineInlineComments: boolean; suggestedChanges: boolean },
+): PublicationPlan {
+  return {
+    ...plan,
+    inlineItems: plan.inlineItems
+      .filter((item) => capabilities.multilineInlineComments || item.startLine === item.endLine)
+      .map((item) => {
+        if (capabilities.suggestedChanges || !item.finding.suggestedFix) {
+          return item;
+        }
+        const finding = withoutSuggestedFix(item.finding);
+        return {
+          ...item,
+          finding,
+          body: renderInlineBody(finding, item.findingId, item.reviewedHeadSha),
+        };
+      }),
+  };
+}
 
 export type BuildPublicationPlanOptions = {
   event: Pick<ChangeRequestEventContext, "change">;

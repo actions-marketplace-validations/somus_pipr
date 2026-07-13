@@ -198,16 +198,22 @@ describe("pipr CLI", () => {
 
   it("prints TS-first subcommands", async () => {
     const result = await runCli(["--help"]);
-    const action = await runCli(["action", "--help"]);
+    const action = await runCli(["action"]);
+    const hostRun = await runCli(["host-run", "--help"]);
+    const dryRun = await runCli(["dry-run", "--help"]);
 
     expect(result.exitCode).toBe(0);
-    expect(action.exitCode).toBe(0);
+    expect(action.exitCode).toBe(1);
+    expect(hostRun.exitCode).toBe(0);
+    expect(dryRun.exitCode).toBe(0);
     expect(result.stdout).toContain("Start here (for AI agents):");
     expect(result.stdout).toContain("pipr skill");
     expect(result.stdout).toContain("init [options]");
     expect(result.stdout).toContain("check [options]");
     expect(result.stdout).toContain("inspect [options]");
     expect(result.stdout).toContain("review [options]");
+    expect(result.stdout).toContain("host-run [options]");
+    expect(result.stdout).not.toContain("action [options]");
     expect(result.stdout).toContain("skill");
     expect(result.stdout).toContain("update");
     expect(result.stdout).toContain("version");
@@ -219,8 +225,10 @@ describe("pipr CLI", () => {
     expect(init.stdout).toContain("github");
     expect(init.stdout).toContain("none");
     expect(init.stdout).toContain("multi-agent-review");
-    expect(action.stdout).toContain("--config-dir <dir>");
-    expect(action.stdout).not.toContain("--provider <name>");
+    expect(action.stderr).toContain("unknown command 'action'");
+    expect(hostRun.stdout).toContain("--host <host>");
+    expect(hostRun.stdout).toContain("--event <path>");
+    expect(dryRun.stdout).toContain("--host <host>");
   });
 
   it("prints no-args help without failing inside GitHub Actions", async () => {
@@ -607,7 +615,7 @@ describe("pipr CLI", () => {
       for (const args of [
         ["check"],
         ["inspect"],
-        ["dry-run", "--event", eventPath],
+        ["dry-run", "--host", "github", "--event", eventPath],
         ["review", "--base", "HEAD"],
       ]) {
         const result = await runCli(args, {}, workspace);
@@ -650,7 +658,7 @@ describe("pipr CLI", () => {
     }
   });
 
-  it("keeps GitHub Actions error formatting for action runs", async () => {
+  it("keeps GitHub Actions error formatting for GitHub host runs", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-cli-"));
     try {
       const result = await runCli(["check"], { GITHUB_ACTIONS: "true" }, workspace);
@@ -712,22 +720,41 @@ describe("pipr CLI", () => {
     }
   });
 
-  it("runs action dry-run without requiring provider env", async () => {
-    const result = await runActionWithGitWorkspace({
-      env: { PIPR_DRY_RUN: "1" },
+  it("runs host-run through the GitHub Action boundary without requiring provider env", async () => {
+    const result = await runHostRunWithGitWorkspace({
+      command: "host-run-explicit",
+      env: { GITHUB_ACTIONS: "true", PIPR_DRY_RUN: "1" },
     });
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("::group::pipr action");
+    expect(result.stdout).toContain("::group::pipr host run");
     expect(result.stdout).toContain('::notice::{"level":"notice"');
-    expect(result.stdout).toContain('"event":"action start"');
+    expect(result.stdout).toContain('"event":"host run start"');
     expect(result.stdout).toContain("pipr loaded change #1 for local/pipr");
     expect(result.stdout).toContain("PIPR_DRY_RUN=1");
     expect(result.piCalled).toBe(false);
   });
 
-  it("fails action dry-run before model work when config is missing", async () => {
-    const result = await runActionWithGitWorkspace({
+  it("runs host-run with explicit and environment-selected GitHub adapters", async () => {
+    const explicit = await runHostRunWithGitWorkspace({
+      command: "host-run-explicit",
+      env: { PIPR_DRY_RUN: "1" },
+    });
+    const detected = await runHostRunWithGitWorkspace({
+      command: "host-run-detected",
+      env: { PIPR_DRY_RUN: "1", PIPR_CODE_HOST: "github" },
+    });
+
+    for (const result of [explicit, detected]) {
+      expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain("pipr dry-run completed for change #1");
+      expect(result.piCalled).toBe(false);
+    }
+  });
+
+  it("fails host-run dry-run before model work when config is missing", async () => {
+    const result = await runHostRunWithGitWorkspace({
+      command: "host-run-explicit",
       initConfig: false,
       env: { PIPR_DRY_RUN: "1" },
     });
@@ -775,7 +802,11 @@ describe("pipr CLI", () => {
 
       const check = await runCli(["check"], {}, workspace);
       const inspect = await runCli(["inspect"], {}, workspace);
-      const dryRun = await runCli(["dry-run", "--event", eventPath], {}, workspace);
+      const dryRun = await runCli(
+        ["dry-run", "--host", "github", "--event", eventPath],
+        {},
+        workspace,
+      );
       const warning =
         `.pipr/package.json pins @usepipr/sdk 0.1.0, but this Pipr runtime is ${cliPackage.version}. ` +
         "Run `pipr init --force` or update .pipr/package.json and .pipr/bun.lock when ready.";
@@ -821,7 +852,8 @@ describe("pipr CLI", () => {
   });
 });
 
-async function runActionWithGitWorkspace(options: {
+async function runHostRunWithGitWorkspace(options: {
+  command?: "host-run-explicit" | "host-run-detected";
   env?: NodeJS.ProcessEnv;
   initConfig?: boolean;
 }): Promise<{
@@ -857,7 +889,13 @@ async function runActionWithGitWorkspace(options: {
     await Bun.write(eventPath, JSON.stringify(pullRequestPayload(baseSha, headSha)));
     await Bun.write(githubOutputPath, "");
 
-    const result = await runCli(["action"], {
+    const args =
+      options.command === "host-run-explicit"
+        ? ["host-run", "--host", "github", "--event", eventPath]
+        : options.command === "host-run-detected"
+          ? ["host-run", "--event", eventPath]
+          : ["host-run", "--host", "github", "--event", eventPath];
+    const result = await runCli(args, {
       DEEPSEEK_API_KEY: "provider-key",
       ...options.env,
       GITHUB_EVENT_PATH: eventPath,

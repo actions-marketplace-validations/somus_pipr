@@ -7,19 +7,19 @@ import { buildDiffManifest } from "../diff/diff.js";
 import { runGit as runGitCommand } from "../diff/git.js";
 import { createLocalChangeRequestEvent } from "../hosts/local/adapter.js";
 import { runTaskRuntime } from "../review/task/task-runtime.js";
-import { createRuntimeActionLog } from "../shared/logging.js";
+import { createRuntimeLog } from "../shared/logging.js";
 import { parseChangeRequestEventContext } from "../types.js";
-import { createActionHostAdapter } from "./action-host.js";
-import { logConfigWarnings, logEventContext, logPhase } from "./action-logging.js";
-import { runIssueCommentActionCommand } from "./command-entry.js";
+import { createHostRunAdapter } from "./adapter.js";
+import { runChangeRequestHostRunCommand } from "./change-request-entry.js";
+import { runIssueCommentHostRunCommand } from "./command-entry.js";
 import { selectLocalReviewTasks } from "./entry-dispatch.js";
-import { runPullRequestActionCommand } from "./pull-request-entry.js";
+import { logConfigWarnings, logEventContext, logPhase } from "./logging.js";
 import type {
-  ActionCommandDependencyOptions,
-  ActionCommandOptions,
-  ActionCommandResult,
   DryRunCommandOptions,
   DryRunCommandResult,
+  HostRunCommandDependencyOptions,
+  HostRunCommandOptions,
+  HostRunCommandResult,
   InitCommandOptions,
   InspectCommandResult,
   LocalReviewCommandOptions,
@@ -27,14 +27,14 @@ import type {
   RuntimeCommandOptions,
   ValidateCommandResult,
 } from "./types.js";
-import { runReviewCommentReplyActionCommand } from "./verifier-entry.js";
+import { runReviewCommentReplyHostRunCommand } from "./verifier-entry.js";
 
-export type { ActionLogRecord, ActionLogSink } from "../shared/logging.js";
+export type { RuntimeLogRecord, RuntimeLogSink } from "../shared/logging.js";
 export type {
-  ActionCommandOptions,
-  ActionCommandResult,
   DryRunCommandOptions,
   DryRunCommandResult,
+  HostRunCommandOptions,
+  HostRunCommandResult,
   InitCommandOptions,
   InspectCommandResult,
   LocalReviewCommandOptions,
@@ -79,21 +79,21 @@ export async function runInspectCommand(
   };
 }
 
-/** Loads the runtime config and pull request event without running review publication. */
+/** Loads the runtime config and change request event without running review publication. */
 export async function runDryRunCommand(
   options: DryRunCommandOptions,
 ): Promise<DryRunCommandResult> {
   const runtime = await loadRuntimeProject({ ...options, requireProviderEnv: false });
-  const adapter = createActionHostAdapter(options);
-  const event = await adapter.events.parseEvent({
+  const adapter = createHostRunAdapter(options);
+  const hostEvent = await adapter.events.parseEvent({
     eventPath: options.eventPath,
-    env: {
-      ...options.env,
-      GITHUB_WORKSPACE: options.rootDir,
-      GITHUB_EVENT_NAME: "pull_request",
-    },
+    env: options.env ?? process.env,
     workspace: options.rootDir,
   });
+  if (hostEvent.kind !== "change-request") {
+    throw new Error(`dry-run requires a change-request event, received ${hostEvent.kind}`);
+  }
+  const event = hostEvent.change;
   return {
     configSource: runtime.settings.source,
     event,
@@ -106,7 +106,7 @@ export async function runLocalReviewCommand(
   options: LocalReviewCommandOptions,
 ): Promise<LocalReviewCommandResult> {
   const log = options.logSink
-    ? createRuntimeActionLog({ logSink: options.logSink, env: options.env })
+    ? createRuntimeLog({ logSink: options.logSink, env: options.env })
     : undefined;
   log?.notice("local review start", {
     root: options.rootDir,
@@ -178,38 +178,45 @@ export async function runLocalReviewCommand(
   return result as LocalReviewCommandResult;
 }
 
-/** Runs the GitHub Action workflow for pull request and issue-comment events. */
-export async function runActionCommand(
-  options: ActionCommandOptions,
-): Promise<ActionCommandResult> {
-  return await runActionCommandWithDependencies(options);
+/** Runs a normalized code host event through the selected adapter. */
+export async function runHostRunCommand(
+  options: HostRunCommandOptions,
+): Promise<HostRunCommandResult> {
+  return await runHostRunCommandWithDependencies(options);
 }
 
-export async function runActionCommandWithDependencies(
-  options: ActionCommandDependencyOptions,
-): Promise<ActionCommandResult> {
-  const log = createRuntimeActionLog({ logSink: options.logSink, env: options.env });
-  return await log.group("pipr action", async () => {
-    const eventName = (options.env ?? process.env).GITHUB_EVENT_NAME ?? "pull_request";
-    log.notice("action start", {
-      eventName,
+export async function runHostRunCommandWithDependencies(
+  options: HostRunCommandDependencyOptions,
+): Promise<HostRunCommandResult> {
+  const log = createRuntimeLog({ logSink: options.logSink, env: options.env });
+  return await log.group("pipr host run", async () => {
+    log.notice("host run start", {
       dryRun: options.dryRun,
       root: options.rootDir,
       configDir: options.configDir,
     });
-    const adapter = createActionHostAdapter(options);
+    const adapter = createHostRunAdapter(options);
     await logPhase(log, "workspace", async () => {
       adapter.workspace.ensureWorkspaceSafeDirectory?.({
         rootDir: options.rootDir,
         env: options.env,
       });
     });
-    if (eventName === "issue_comment") {
-      return await runIssueCommentActionCommand(options, adapter, log);
+    const event = await logPhase(log, "parse event", async () =>
+      adapter.events.parseEvent({
+        eventPath: options.eventPath,
+        env: options.env ?? process.env,
+        workspace: options.rootDir,
+      }),
+    );
+    log.notice("event dispatch", { kind: event.kind });
+    switch (event.kind) {
+      case "command-comment":
+        return await runIssueCommentHostRunCommand(options, adapter, log, event.comment);
+      case "review-comment-reply":
+        return await runReviewCommentReplyHostRunCommand(options, adapter, log, event.reply);
+      case "change-request":
+        return await runChangeRequestHostRunCommand(options, adapter, log, event.change);
     }
-    if (eventName === "pull_request_review_comment") {
-      return await runReviewCommentReplyActionCommand(options, adapter, log);
-    }
-    return await runPullRequestActionCommand(options, adapter, log);
   });
 }

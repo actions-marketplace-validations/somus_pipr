@@ -1,9 +1,8 @@
 import { firstNonEmptyLine, isPiprCommandLine } from "../commands/grammar.js";
 import type { CodeHostAdapter, CommandCommentEvent } from "../hosts/types.js";
-import type { RuntimeActionLog } from "../shared/logging.js";
+import type { RuntimeLog } from "../shared/logging.js";
 import type { ChangeRequestEventContext } from "../types.js";
 import { parseChangeRequestEventContext } from "../types.js";
-import { logEventContext, logPhase } from "./action-logging.js";
 import {
   dispatchRuntimeEntry,
   hasRequiredRepositoryPermission,
@@ -12,11 +11,12 @@ import {
   permissionDeniedHelp,
   resolvePlanCommand,
 } from "./entry-dispatch.js";
+import { logEventContext, logPhase } from "./logging.js";
 import { runTrustedReviewAndPublish } from "./review-publishing.js";
 import { loadTrustedRuntimeForEvent, prepareTrustedHeadCheckout } from "./trusted-runtime.js";
 import type {
-  ActionCommandDependencyOptions,
-  ActionCommandResult,
+  HostRunCommandDependencyOptions,
+  HostRunCommandResult,
   TrustedReviewAndPublishResult,
   TrustedRuntimeProject,
 } from "./types.js";
@@ -32,31 +32,31 @@ type PreparedIssueCommentCommand =
       resolution: Exclude<PlanCommandResolution, { kind: "ignored" }>;
     };
 
-export async function runIssueCommentActionCommand(
-  options: ActionCommandDependencyOptions,
+export async function runIssueCommentHostRunCommand(
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
-  log: RuntimeActionLog,
-): Promise<ActionCommandResult> {
-  const prepared = await prepareIssueCommentCommand(options, adapter, log);
+  log: RuntimeLog,
+  comment: CommandCommentEvent,
+): Promise<HostRunCommandResult> {
+  if (!adapter.capabilities.commandComments) {
+    const ignored = { kind: "ignored" as const, reason: "host adapter does not support commands" };
+    log.notice("event ignored", { reason: ignored.reason });
+    return ignored;
+  }
+  const prepared = await prepareIssueCommentCommand(options, adapter, log, comment);
   if (prepared.kind === "ignored") {
-    log.notice("action ignored", { reason: prepared.reason });
+    log.notice("event ignored", { reason: prepared.reason });
     return prepared;
   }
   return await dispatchIssueCommentCommand(options, adapter, prepared, log);
 }
 
 async function prepareIssueCommentCommand(
-  options: ActionCommandDependencyOptions,
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
-  log: RuntimeActionLog,
+  log: RuntimeLog,
+  comment: CommandCommentEvent,
 ): Promise<PreparedIssueCommentCommand> {
-  const comment = await logPhase(log, "parse issue comment", async () =>
-    adapter.events.resolveCommandComment({
-      eventPath: options.eventPath,
-      env: options.env ?? process.env,
-      workspace: options.rootDir,
-    }),
-  );
   const runnable = runnableIssueCommentCommand(comment, options.dryRun);
   if (runnable.kind === "ignored") {
     return runnable;
@@ -77,6 +77,7 @@ async function prepareIssueCommentCommand(
     rawAction: loaded.rawAction ?? comment.rawAction,
     platform: { id: adapter.id },
     repository: loaded.repository,
+    coordinates: loaded.coordinates,
     change: loaded.change,
     workspace: loaded.workspace ?? comment.workspace,
   });
@@ -109,11 +110,11 @@ function runnableIssueCommentCommand(
 }
 
 async function dispatchIssueCommentCommand(
-  options: ActionCommandDependencyOptions,
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
   prepared: Extract<PreparedIssueCommentCommand, { kind: "prepared" }>,
-  log: RuntimeActionLog,
-): Promise<ActionCommandResult> {
+  log: RuntimeLog,
+): Promise<HostRunCommandResult> {
   const requiredPermission =
     prepared.resolution.kind === "matched"
       ? prepared.resolution.invocation.requiredPermission
@@ -209,14 +210,14 @@ async function issueCommentCommandResult(options: {
   completed: TrustedReviewAndPublishResult;
   event: ChangeRequestEventContext;
   commandName: string;
-  sourceCommentId: number;
+  sourceCommentId: string;
   configSource: string;
-}): Promise<ActionCommandResult> {
+}): Promise<HostRunCommandResult> {
   if (options.completed.kind === "skipped") {
     return { kind: "ignored", reason: options.completed.reason };
   }
   if (options.completed.kind === "command-response") {
-    return await publishCommandResponseActionResult({
+    return await publishCommandResponseHostRunResult({
       adapter: options.adapter,
       completed: options.completed,
       event: options.event,
@@ -234,13 +235,13 @@ async function issueCommentCommandResult(options: {
   };
 }
 
-async function publishCommandResponseActionResult(options: {
+async function publishCommandResponseHostRunResult(options: {
   adapter: CodeHostAdapter;
   completed: Extract<TrustedReviewAndPublishResult, { kind: "command-response" }>;
   event: ChangeRequestEventContext;
-  sourceCommentId: number;
+  sourceCommentId: string;
   configSource: string;
-}): Promise<ActionCommandResult> {
+}): Promise<HostRunCommandResult> {
   const publishCommandResponse = options.adapter.publication?.publishCommandResponse;
   if (!publishCommandResponse) {
     throw new Error("command response publication is not available for this code host");

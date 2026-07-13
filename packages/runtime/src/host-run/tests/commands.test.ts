@@ -5,25 +5,73 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runGit as runGitCommand } from "../../diff/git.js";
+import { createGitHubHostAdapter } from "../../hosts/github/adapter.js";
 import type { GitHubCommandClient } from "../../hosts/github/command.js";
 import type { GitHubPublicationClient } from "../../hosts/github/publication.js";
-import type { RepositoryPermission } from "../../hosts/types.js";
+import type {
+  CodeHostAdapter,
+  CodeHostCapabilities,
+  RepositoryPermission,
+} from "../../hosts/types.js";
 import {
   renderInlineFindingMarker,
   renderResolvedFindingMarker,
   renderVerifierResponseMarker,
 } from "../../review/prior-state.js";
 import { runtimeVersion } from "../../shared/version.js";
-import { memoryActionLogSink } from "../../tests/helpers/action-log-sink.js";
+import { memoryRuntimeLogSink } from "../../tests/helpers/runtime-log-sink.js";
 import {
-  type ActionLogSink,
-  runActionCommandWithDependencies,
+  type RuntimeLogSink,
+  runHostRunCommandWithDependencies as runHostRun,
   runLocalReviewCommand,
 } from "../commands.js";
 
-describe("runActionCommand issue_comment dispatch", () => {
+type TestHostRunOptions = Omit<Parameters<typeof runHostRun>[0], "hostAdapter"> & {
+  hostAdapter?: CodeHostAdapter;
+  githubClient?: GitHubCommandClient;
+  githubPublicationClient?: GitHubPublicationClient;
+};
+
+function runHostRunCommandWithDependencies(options: TestHostRunOptions) {
+  const { githubClient, githubPublicationClient, ...hostRunOptions } = options;
+  return runHostRun({
+    ...hostRunOptions,
+    hostAdapter:
+      options.hostAdapter ??
+      (githubClient || githubPublicationClient
+        ? createGitHubHostAdapter({
+            commandClient: githubClient,
+            publicationClient: githubPublicationClient,
+          })
+        : undefined),
+  });
+}
+
+describe("runHostRunCommand issue_comment dispatch", () => {
+  it("ignores command events when the adapter disables command comments", async () => {
+    const workspace = await createCommandWorkspace();
+    const eventPath = path.join(workspace.rootDir, "event.json");
+    await writeIssueCommentEvent(eventPath, "@pipr review", "created", 123);
+    try {
+      const result = await runHostRunCommandWithDependencies({
+        rootDir: workspace.rootDir,
+        configDir: ".pipr",
+        eventPath,
+        dryRun: false,
+        env: issueCommentEnv(workspace.rootDir, eventPath),
+        hostAdapter: githubAdapterWithCapabilities(workspace, { commandComments: false }),
+        piExecutable: workspace.piExecutable,
+      });
+
+      expect(result).toEqual({ kind: "ignored", reason: "host adapter does not support commands" });
+      await expectPiNotCalled(workspace);
+    } finally {
+      await removeWorkspace(workspace.rootDir);
+    }
+  });
+
   it("ignores issue comments that are not pull request comments", async () => {
-    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-action-command-"));
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-host-run-command-"));
     try {
       const eventPath = path.join(rootDir, "event.json");
       await Bun.write(
@@ -37,7 +85,7 @@ describe("runActionCommand issue_comment dispatch", () => {
       );
 
       await expect(
-        runActionCommandWithDependencies({
+        runHostRunCommandWithDependencies({
           rootDir,
           configDir: ".pipr",
           eventPath,
@@ -92,7 +140,7 @@ describe("runActionCommand issue_comment dispatch", () => {
       await writeIssueCommentEvent(eventPath, "@pipr review");
 
       await expect(
-        runActionCommandWithDependencies({
+        runHostRunCommandWithDependencies({
           rootDir: workspace.rootDir,
           configDir: ".pipr",
           eventPath,
@@ -118,7 +166,7 @@ describe("runActionCommand issue_comment dispatch", () => {
       await writeIssueCommentEvent(eventPath, "@pipr review", "edited");
 
       await expect(
-        runActionCommandWithDependencies({
+        runHostRunCommandWithDependencies({
           rootDir: workspace.rootDir,
           configDir: ".pipr",
           eventPath,
@@ -188,7 +236,7 @@ describe("runActionCommand issue_comment dispatch", () => {
 
   it("executes commands from the base commit config instead of PR-head config", async () => {
     const workspace = await createCommandWorkspace({ checkoutBaseBeforeRun: true });
-    const logs = memoryActionLogSink();
+    const logs = memoryRuntimeLogSink();
     try {
       expect(currentGitHead(workspace.rootDir)).toBe(workspace.baseSha);
       const result = await runIssueCommentCommand(
@@ -207,7 +255,8 @@ describe("runActionCommand issue_comment dispatch", () => {
       expect(result.kind === "review" ? result.review.validated.validFindings : []).toEqual([]);
       const output = logs.messages.join("\n");
       expect(output).toContain('"eventName":"issue_comment"');
-      expect(output).toContain('"event":"parse issue comment start"');
+      expect(output).toContain('"event":"parse event start"');
+      expect(output).toContain('"event":"event dispatch","kind":"command-comment"');
       expect(output).toContain('"event":"command dispatch"');
       expect(output).toContain('"event":"publication result"');
       await expectReviewRanAtHead(result, workspace);
@@ -238,11 +287,14 @@ describe("runActionCommand issue_comment dispatch", () => {
 
       expect(result).toMatchObject({
         kind: "command-response",
+        event: {
+          coordinates: { provider: "github", owner: "local", repository: "pipr" },
+        },
         command: "ask",
         response: {
           body: "The change updates command output.",
         },
-        publication: { action: "created", id: 10 },
+        publication: { action: "created", id: "10" },
       });
       expect(publication.writes.created).toHaveLength(1);
       expect(publication.writes.created[0]).toContain(
@@ -330,7 +382,7 @@ describe("runActionCommand issue_comment dispatch", () => {
 
       expect(result).toMatchObject({
         kind: "command-response",
-        publication: { action: "updated", id: 88 },
+        publication: { action: "updated", id: "88" },
       });
       expect(publication.writes.created).toEqual([]);
       expect(publication.writes.updated).toHaveLength(1);
@@ -401,7 +453,7 @@ describe("runLocalReviewCommand", () => {
       headConfigTs: localReviewSelectionConfigTs(),
       sdkVersion: "0.1.0",
     });
-    const logs = memoryActionLogSink();
+    const logs = memoryRuntimeLogSink();
     try {
       const result = await runLocalReviewCommand({
         rootDir: workspace.rootDir,
@@ -445,10 +497,10 @@ describe("runLocalReviewCommand", () => {
   });
 });
 
-describe("runActionCommand pull_request dispatch", () => {
+describe("runHostRunCommand pull_request dispatch", () => {
   it("marks the GitHub Action workspace as a git safe directory before trusted config reads", async () => {
     const workspace = await createCommandWorkspace();
-    const gitConfigDir = await mkdtemp(path.join(os.tmpdir(), "pipr-action-gitconfig-"));
+    const gitConfigDir = await mkdtemp(path.join(os.tmpdir(), "pipr-host-run-gitconfig-"));
     const previousHome = process.env.HOME;
     const previousGitConfigEnv = snapshotGitConfigEnv();
     try {
@@ -456,7 +508,7 @@ describe("runActionCommand pull_request dispatch", () => {
       const eventPath = path.join(workspace.rootDir, "event.json");
       await writePullRequestEvent(eventPath, workspace);
 
-      const result = await runActionCommandWithDependencies({
+      const result = await runHostRunCommandWithDependencies({
         rootDir: workspace.rootDir,
         configDir: ".pipr",
         eventPath,
@@ -501,7 +553,7 @@ describe("runActionCommand pull_request dispatch", () => {
       const eventPath = path.join(workspace.rootDir, "event.json");
       await writePullRequestEvent(eventPath, workspace);
 
-      const result = await runActionCommandWithDependencies({
+      const result = await runHostRunCommandWithDependencies({
         rootDir: workspace.rootDir,
         configDir: ".pipr",
         eventPath,
@@ -580,7 +632,25 @@ describe("runActionCommand pull_request dispatch", () => {
     }
   });
 
-  it("fails before Pi when GitHub check creation lacks checks write permission", async () => {
+  it("does not publish GitHub statuses for non-pull_request change events", async () => {
+    const workspace = await createCommandWorkspace({
+      baseConfigTs: reviewConfigTs({ checks: true }),
+      checkoutBaseBeforeRun: true,
+    });
+    const checks: FakeCheckRuns = { created: [], updated: [] };
+    try {
+      await runPullRequestAction(workspace, {
+        eventName: "pull_request_target",
+        githubPublicationClient: fakeGitHubPublicationClient(workspace, [], checks),
+      });
+
+      expect(checks).toEqual({ created: [], updated: [] });
+    } finally {
+      await removeWorkspace(workspace.rootDir);
+    }
+  });
+
+  it("fails before Pi when code host status publication lacks permission", async () => {
     const workspace = await createCommandWorkspace({
       baseConfigTs: reviewConfigTs({ checks: true }),
       checkoutBaseBeforeRun: true,
@@ -593,7 +663,7 @@ describe("runActionCommand pull_request dispatch", () => {
 
       await expect(
         runPullRequestAction(workspace, { githubPublicationClient: client }),
-      ).rejects.toThrow("checks: write");
+      ).rejects.toThrow("Check the adapter credential scopes");
       await expectPiNotCalled(workspace);
     } finally {
       await removeWorkspace(workspace.rootDir);
@@ -630,7 +700,7 @@ describe("runActionCommand pull_request dispatch", () => {
           checkRunId: 6,
           name: "all",
           conclusion: "failure",
-          summary: "pipr failed; see Action logs for details.",
+          summary: "pipr failed; see runner logs for details.",
         },
       ]);
     } finally {
@@ -655,7 +725,7 @@ describe("runActionCommand pull_request dispatch", () => {
 
       await expect(
         runPullRequestAction(workspace, { githubPublicationClient: client }),
-      ).rejects.toThrow("checks: write");
+      ).rejects.toThrow("Check the adapter credential scopes");
 
       expect(checks.created.map((check) => check.name)).toEqual(["review"]);
       expect(checks.updated).toEqual([
@@ -663,7 +733,7 @@ describe("runActionCommand pull_request dispatch", () => {
           checkRunId: 4,
           name: "review",
           conclusion: "failure",
-          summary: "pipr failed; see Action logs for details.",
+          summary: "pipr failed; see runner logs for details.",
         },
       ]);
       await expectPiNotCalled(workspace);
@@ -714,15 +784,15 @@ describe("runActionCommand pull_request dispatch", () => {
     }
   });
 
-  it("logs action, event, config, diff, task, Pi, and publication breadcrumbs", async () => {
+  it("logs host run, event, config, diff, task, Pi, and publication breadcrumbs", async () => {
     const workspace = await createCommandWorkspace({ checkoutBaseBeforeRun: true });
-    const logs = memoryActionLogSink();
+    const logs = memoryRuntimeLogSink();
     try {
       const result = await runPullRequestAction(workspace, { logSink: logs.logSink });
 
       expect(result).toMatchObject({ kind: "review" });
       const output = logs.messages.join("\n");
-      expect(output).toContain('"event":"action start"');
+      expect(output).toContain('"event":"host run start"');
       expect(output).toContain('"eventName":"pull_request"');
       expect(output).toContain('"platform":"github"');
       expect(output).toContain('"event":"trusted config"');
@@ -733,7 +803,7 @@ describe("runActionCommand pull_request dispatch", () => {
       expect(output).toContain('"event":"pi run"');
       expect(output).toContain('"event":"publication result"');
       expect(logs.notices.join("\n")).toContain('"event":"publication result"');
-      expect(logs.groups).toContain("pipr action");
+      expect(logs.groups).toContain("pipr host run");
       expect(logs.groups).toContain("publish review");
     } finally {
       await removeWorkspace(workspace.rootDir);
@@ -745,7 +815,7 @@ describe("runActionCommand pull_request dispatch", () => {
       checkoutBaseBeforeRun: true,
       sdkVersion: "0.1.0",
     });
-    const logs = memoryActionLogSink();
+    const logs = memoryRuntimeLogSink();
     try {
       const result = await runPullRequestAction(workspace, { logSink: logs.logSink });
 
@@ -764,7 +834,7 @@ describe("runActionCommand pull_request dispatch", () => {
     }
   });
 
-  it("fails pull request actions before Pi when the config SDK pin is newer than Pipr", async () => {
+  it("fails pull request host runs before Pi when the config SDK pin is newer than Pipr", async () => {
     const workspace = await createCommandWorkspace({
       checkoutBaseBeforeRun: true,
       sdkVersion: "999.0.0",
@@ -781,7 +851,7 @@ describe("runActionCommand pull_request dispatch", () => {
 
   it("logs bounded Pi failure snippets without leaking secret env values", async () => {
     const workspace = await createCommandWorkspace({ checkoutBaseBeforeRun: true });
-    const logs = memoryActionLogSink();
+    const logs = memoryRuntimeLogSink();
     const secret = "super-secret-deepseek-key";
     try {
       await writeFailingPiExecutable(workspace.piExecutable);
@@ -789,7 +859,7 @@ describe("runActionCommand pull_request dispatch", () => {
       await writePullRequestEvent(eventPath, workspace);
 
       await expect(
-        runActionCommandWithDependencies({
+        runHostRunCommandWithDependencies({
           rootDir: workspace.rootDir,
           configDir: ".pipr",
           eventPath,
@@ -821,7 +891,7 @@ describe("runActionCommand pull_request dispatch", () => {
 
       let thrown: unknown;
       try {
-        await runActionCommandWithDependencies({
+        await runHostRunCommandWithDependencies({
           rootDir: workspace.rootDir,
           configDir: ".pipr",
           eventPath,
@@ -846,7 +916,34 @@ describe("runActionCommand pull_request dispatch", () => {
   });
 });
 
-describe("runActionCommand pull_request_review_comment dispatch", () => {
+describe("runHostRunCommand pull_request_review_comment dispatch", () => {
+  it("ignores reply events when the adapter disables reply verification", async () => {
+    const workspace = await createCommandWorkspace();
+    const eventPath = path.join(workspace.rootDir, "event.json");
+    await writeReviewCommentEvent(eventPath);
+    try {
+      for (const capabilities of [{ reviewCommentReplies: false }, { threadResolution: false }]) {
+        const result = await runHostRunCommandWithDependencies({
+          rootDir: workspace.rootDir,
+          configDir: ".pipr",
+          eventPath,
+          dryRun: false,
+          env: reviewCommentEnv(workspace.rootDir, eventPath),
+          hostAdapter: githubAdapterWithCapabilities(workspace, capabilities),
+          piExecutable: workspace.piExecutable,
+        });
+
+        expect(result).toEqual({
+          kind: "ignored",
+          reason: "host adapter does not support verifier replies",
+        });
+      }
+      await expectPiNotCalled(workspace);
+    } finally {
+      await removeWorkspace(workspace.rootDir);
+    }
+  });
+
   it("skips review comment verifier dispatch in dry-run mode without calling GitHub", async () => {
     const workspace = await createCommandWorkspace();
     try {
@@ -854,7 +951,7 @@ describe("runActionCommand pull_request_review_comment dispatch", () => {
       await writeReviewCommentEvent(eventPath);
 
       await expect(
-        runActionCommandWithDependencies({
+        runHostRunCommandWithDependencies({
           rootDir: workspace.rootDir,
           configDir: ".pipr",
           eventPath,
@@ -1026,7 +1123,7 @@ describe("runActionCommand pull_request_review_comment dispatch", () => {
   it("runs user-reply verifier and publishes still-valid responses", async () => {
     const workspace = await createCommandWorkspace({ checkoutBaseBeforeRun: true });
     const publication = verifierPublicationClient(workspace);
-    const logs = memoryActionLogSink();
+    const logs = memoryRuntimeLogSink();
     try {
       await writeStillValidVerifierOutput(
         workspace,
@@ -1038,7 +1135,8 @@ describe("runActionCommand pull_request_review_comment dispatch", () => {
       });
       const output = logs.messages.join("\n");
       expect(output).toContain('"eventName":"pull_request_review_comment"');
-      expect(output).toContain('"event":"parse review comment reply start"');
+      expect(output).toContain('"event":"parse event start"');
+      expect(output).toContain('"event":"event dispatch","kind":"review-comment-reply"');
       expect(output).toContain('"event":"verifier start"');
       expect(output).toContain('"event":"verifier publication"');
       expect(publication.reviewReplies[0]?.body).toContain(
@@ -1112,7 +1210,7 @@ async function createCommandWorkspace(
     sdkVersion?: string;
   } = {},
 ): Promise<CommandWorkspace> {
-  const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-action-command-"));
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-host-run-command-"));
   runGit(rootDir, ["init", "--initial-branch=main"]);
   runGit(rootDir, ["config", "user.name", "pipr test"]);
   runGit(rootDir, ["config", "user.email", "pipr@example.test"]);
@@ -1179,12 +1277,12 @@ async function runIssueCommentCommand(
   permission: RepositoryPermission,
   checks?: FakeCheckRuns,
   githubPublicationClient?: GitHubPublicationClient,
-  logSink?: ActionLogSink,
+  logSink?: RuntimeLogSink,
   commentId = 123,
 ) {
   const eventPath = path.join(workspace.rootDir, "event.json");
   await writeIssueCommentEvent(eventPath, body, "created", commentId);
-  return await runActionCommandWithDependencies({
+  return await runHostRunCommandWithDependencies({
     rootDir: workspace.rootDir,
     configDir: ".pipr",
     eventPath,
@@ -1201,18 +1299,22 @@ async function runIssueCommentCommand(
 async function runPullRequestAction(
   workspace: CommandWorkspace,
   options: {
+    eventName?: string;
     githubPublicationClient?: GitHubPublicationClient;
-    logSink?: ActionLogSink;
+    logSink?: RuntimeLogSink;
   } = {},
 ) {
   const eventPath = path.join(workspace.rootDir, "event.json");
   await writePullRequestEvent(eventPath, workspace);
-  return await runActionCommandWithDependencies({
+  return await runHostRunCommandWithDependencies({
     rootDir: workspace.rootDir,
     configDir: ".pipr",
     eventPath,
     dryRun: false,
-    env: pullRequestEnv(workspace.rootDir, eventPath),
+    env: {
+      ...pullRequestEnv(workspace.rootDir, eventPath),
+      GITHUB_EVENT_NAME: options.eventName ?? "pull_request",
+    },
     githubPublicationClient:
       options.githubPublicationClient ?? fakeGitHubPublicationClient(workspace),
     piExecutable: workspace.piExecutable,
@@ -1226,11 +1328,11 @@ async function runReviewCommentAction(
     dryRun?: boolean;
     githubClient: GitHubCommandClient;
     githubPublicationClient: GitHubPublicationClient;
-    logSink?: ActionLogSink;
+    logSink?: RuntimeLogSink;
   },
 ) {
   const eventPath = path.join(workspace.rootDir, "event.json");
-  return await runActionCommandWithDependencies({
+  return await runHostRunCommandWithDependencies({
     rootDir: workspace.rootDir,
     configDir: ".pipr",
     eventPath,
@@ -1305,7 +1407,7 @@ async function expectVerifierReplyPublished(
   options: {
     githubClient: GitHubCommandClient;
     event?: Parameters<typeof writeReviewCommentEvent>[1];
-    logSink?: ActionLogSink;
+    logSink?: RuntimeLogSink;
   },
 ): Promise<void> {
   const eventPath = path.join(workspace.rootDir, "event.json");
@@ -1315,7 +1417,11 @@ async function expectVerifierReplyPublished(
     githubPublicationClient: publication,
     logSink: options.logSink,
   });
-  expect(result).toMatchObject({ kind: "verifier", errors: [] });
+  expect(result).toMatchObject({
+    kind: "verifier",
+    errors: [],
+    event: { coordinates: { provider: "github", owner: "local", repository: "pipr" } },
+  });
   expect(publication.reviewReplies).toHaveLength(1);
   await expectPiCalled(workspace);
 }
@@ -1350,7 +1456,7 @@ async function verifierRunIdFromReplyAction(
 }
 
 async function expectReviewRanAtHead(
-  result: Awaited<ReturnType<typeof runActionCommandWithDependencies>>,
+  result: Awaited<ReturnType<typeof runHostRunCommandWithDependencies>>,
   workspace: CommandWorkspace,
 ): Promise<void> {
   expect(result).toMatchObject({ kind: "review" });
@@ -1995,6 +2101,17 @@ function reviewCommentEnv(rootDir: string, eventPath: string): NodeJS.ProcessEnv
     GITHUB_EVENT_PATH: eventPath,
     GITHUB_WORKSPACE: rootDir,
   };
+}
+
+function githubAdapterWithCapabilities(
+  workspace: CommandWorkspace,
+  overrides: Partial<CodeHostCapabilities>,
+) {
+  const adapter = createGitHubHostAdapter({
+    commandClient: fakeGitHubClient(workspace, "write"),
+    publicationClient: fakeGitHubPublicationClient(workspace),
+  });
+  return { ...adapter, capabilities: { ...adapter.capabilities, ...overrides } };
 }
 
 function restoreEnv(key: string, value: string | undefined): void {

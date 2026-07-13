@@ -4,43 +4,37 @@ import { resolveProvider } from "../review/agent/review-run.js";
 import { isPiprThreadActionReplyBody } from "../review/prior-state.js";
 import { stableReviewRunId } from "../review/run-identity.js";
 import { runInternalVerifier } from "../review/verifier.js";
-import type { RuntimeActionLog } from "../shared/logging.js";
+import type { RuntimeLog } from "../shared/logging.js";
 import type { ChangeRequestEventContext, PiprConfig } from "../types.js";
 import { parseChangeRequestEventContext } from "../types.js";
-import { logEventContext, logPhase } from "./action-logging.js";
 import { hasRequiredRepositoryPermission } from "./entry-dispatch.js";
+import { logEventContext, logPhase } from "./logging.js";
 import { loadTrustedRuntimeForEvent, prepareTrustedHeadCheckout } from "./trusted-runtime.js";
 import type {
-  ActionCommandDependencyOptions,
-  ActionCommandResult,
+  HostRunCommandDependencyOptions,
+  HostRunCommandResult,
   TrustedRuntimeProject,
 } from "./types.js";
 
-export async function runReviewCommentReplyActionCommand(
-  options: ActionCommandDependencyOptions,
+export async function runReviewCommentReplyHostRunCommand(
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
-  log: RuntimeActionLog,
-): Promise<ActionCommandResult> {
+  log: RuntimeLog,
+  reply: ReviewCommentReplyEvent,
+): Promise<HostRunCommandResult> {
   const capabilities = reviewCommentReplyDispatchCapabilities(options, adapter);
   if (capabilities.kind === "ignored") {
-    log.notice("action ignored", { reason: capabilities.reason });
+    log.notice("event ignored", { reason: capabilities.reason });
     return capabilities;
   }
-  const reply = await logPhase(log, "parse review comment reply", async () =>
-    capabilities.resolveReviewCommentReply({
-      eventPath: options.eventPath,
-      env: options.env ?? process.env,
-      workspace: options.rootDir,
-    }),
-  );
   const runnable = runnableReviewCommentReply(reply);
   if (runnable.kind === "ignored") {
-    log.notice("action ignored", { reason: runnable.reason });
+    log.notice("event ignored", { reason: runnable.reason });
     return runnable;
   }
   const prepared = await prepareReviewCommentVerifier(options, adapter, reply, log);
   if (prepared.kind === "ignored") {
-    log.notice("action ignored", { reason: prepared.reason });
+    log.notice("event ignored", { reason: prepared.reason });
     return prepared;
   }
   const result = await runReviewCommentVerifier(options, adapter, prepared, log);
@@ -64,21 +58,18 @@ export async function runReviewCommentReplyActionCommand(
 }
 
 function reviewCommentReplyDispatchCapabilities(
-  options: ActionCommandDependencyOptions,
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
 ):
   | { kind: "ignored"; reason: string }
   | {
       kind: "ready";
-      resolveReviewCommentReply: NonNullable<
-        CodeHostAdapter["events"]["resolveReviewCommentReply"]
-      >;
       publishThreadActions: NonNullable<
         NonNullable<CodeHostAdapter["publication"]>["publishThreadActions"]
       >;
     } {
-  if (!adapter.events.resolveReviewCommentReply) {
-    return { kind: "ignored", reason: "host adapter does not support review comment replies" };
+  if (!adapter.capabilities.reviewCommentReplies || !adapter.capabilities.threadResolution) {
+    return { kind: "ignored", reason: "host adapter does not support verifier replies" };
   }
   if (!adapter.publication?.publishThreadActions) {
     return { kind: "ignored", reason: "host adapter does not support verifier thread actions" };
@@ -88,7 +79,6 @@ function reviewCommentReplyDispatchCapabilities(
   }
   return {
     kind: "ready",
-    resolveReviewCommentReply: adapter.events.resolveReviewCommentReply,
     publishThreadActions: adapter.publication.publishThreadActions,
   };
 }
@@ -97,16 +87,16 @@ type PreparedReviewCommentVerifier =
   | { kind: "ignored"; reason: string }
   | {
       kind: "prepared";
-      reply: ReviewCommentReplyEvent & { parentCommentId: number };
+      reply: ReviewCommentReplyEvent & { parentCommentId: string };
       event: ChangeRequestEventContext;
       trustedRuntime: TrustedRuntimeProject;
     };
 
 async function prepareReviewCommentVerifier(
-  options: ActionCommandDependencyOptions,
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
   reply: ReviewCommentReplyEvent,
-  log: RuntimeActionLog,
+  log: RuntimeLog,
 ): Promise<PreparedReviewCommentVerifier> {
   if (!reply.parentCommentId) {
     return { kind: "ignored", reason: "review comment was not a reply" };
@@ -127,6 +117,7 @@ async function prepareReviewCommentVerifier(
     rawAction: loaded.rawAction ?? reply.rawAction,
     platform: { id: adapter.id },
     repository: loaded.repository,
+    coordinates: loaded.coordinates,
     change: loaded.change,
     workspace: loaded.workspace ?? reply.workspace,
   });
@@ -152,10 +143,10 @@ async function prepareReviewCommentVerifier(
 }
 
 async function runReviewCommentVerifier(
-  options: ActionCommandDependencyOptions,
+  options: HostRunCommandDependencyOptions,
   adapter: CodeHostAdapter,
   prepared: Exclude<PreparedReviewCommentVerifier, { kind: "ignored" }>,
-  log: RuntimeActionLog,
+  log: RuntimeLog,
 ) {
   const { event, reply, trustedRuntime } = prepared;
   const config = trustedRuntime.settings.config;
