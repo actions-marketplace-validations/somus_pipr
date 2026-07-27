@@ -43,6 +43,16 @@ Use a custom Pi executable during local development:
 pipr review --base origin/main --pi-executable /path/to/pi
 ```
 
+### Diagnostic capture
+
+Capture a redacted Run Bundle when you need phase timing, retry, repair, tool, resource, validation, and output evidence:
+
+```bash
+pipr review --base origin/main --trace ./.pipr-runs
+```
+
+Pass a bare `--trace` flag to write under the platform Pipr state directory, partitioned by repository. The `pipr runs` commands discover that store automatically. Local capture is opt-in and does not change the rendered review output.
+
 ### Local Pi agent directory
 
 For a model without `apiKey`, local review uses your Pi agent directory for authentication. Pipr resolves it from `--pi-agent-dir`, then `PI_CODING_AGENT_DIR`, and finally `$HOME/.pi/agent`:

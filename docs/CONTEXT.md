@@ -57,6 +57,10 @@ _Avoid_: YAML workflow, block graph
 The Pipr-owned path used by `ctx.change.diffManifest()` and `ctx.pi.run()`.
 _Avoid_: user-authored diff or validation block
 
+**Run Bundle**:
+The versioned, redacted diagnostic record for one Pipr process, identified by an OpenTelemetry trace ID called `executionId`. A bundle can reference a deterministic Review Run through `workId`.
+_Avoid_: Pipr Result, Review Run ID, raw session dump
+
 **Built-in Review**:
 The quick `pipr.review()` wrapper that runs a shardable findings agent followed by one summary agent and renders their combined result.
 _Avoid_: configurable built-in prompt, injected reviewer

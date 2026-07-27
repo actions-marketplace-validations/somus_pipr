@@ -67,15 +67,8 @@ export async function runChangeRequestHostRunCommand(
     });
   } catch (error) {
     const progressFailure = await progress?.fail(error);
-    if (error instanceof ReviewProgressSupersededError || progressFailure === "superseded") {
-      return {
-        kind: "ignored",
-        reason:
-          error instanceof ReviewProgressSupersededError
-            ? error.message
-            : new ReviewProgressSupersededError().message,
-      };
-    }
+    if (error instanceof ReviewProgressSupersededError) throw error;
+    if (progressFailure === "superseded") throw new ReviewProgressSupersededError();
     throw error;
   }
   if (completed.kind === "skipped") {

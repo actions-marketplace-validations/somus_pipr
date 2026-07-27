@@ -17,7 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import cliPackage from "../../package.json" with { type: "json" };
 import { embeddedSdkDeclaration, readSdkDeclarationModules } from "../release/sdk-declaration.js";
-import { runMain } from "../runner.js";
+import { publishRunBundleMetadata, runMain } from "../runner.js";
 import {
   type BundledSkill,
   containedSkillFilePath,
@@ -31,6 +31,53 @@ const repoRoot = path.resolve(cliProjectDir, "../..");
 const cliPath = path.join(cliProjectDir, "src", "main.ts");
 
 describe("pipr CLI", () => {
+  it("publishes finalized run metadata only for GitHub", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-cli-run-metadata-"));
+    const outputPath = path.join(workspace, "github-output.txt");
+    await Bun.write(outputPath, "");
+    const originalOutput = process.env.GITHUB_OUTPUT;
+    const originalLog = console.log;
+    const logs: string[] = [];
+    process.env.GITHUB_OUTPUT = outputPath;
+    console.log = (message?: unknown) => logs.push(String(message));
+    try {
+      await publishRunBundleMetadata(
+        {
+          executionId: "0123456789abcdef0123456789abcdef",
+          directory: path.join(workspace, "bundle;%]\n"),
+          kind: "review",
+          outcome: "succeeded",
+          protection: "age",
+          repository: {
+            host: "bitbucket",
+            repository: "pipr",
+            changeNumber: 42,
+          },
+        },
+        {
+          rootDir: workspace,
+          env: {
+            GITHUB_ACTIONS: "true",
+            TF_BUILD: "True",
+            BITBUCKET_BUILD_NUMBER: "7",
+          },
+        },
+      );
+      const githubOutput = await Bun.file(outputPath).text();
+      expect(githubOutput).toContain("execution-id");
+      expect(githubOutput).toContain("0123456789abcdef0123456789abcdef");
+      expect(githubOutput).toContain("run-bundle-path");
+      expect(githubOutput).toContain("run-artifact-name");
+      expect(githubOutput).toContain("pipr-run-v1-age-pr-42-0123456789abcdef0123456789abcdef");
+      expect(logs).toEqual([]);
+    } finally {
+      if (originalOutput === undefined) delete process.env.GITHUB_OUTPUT;
+      else process.env.GITHUB_OUTPUT = originalOutput;
+      console.log = originalLog;
+      await removeWorkspace(workspace);
+    }
+  });
+
   it("prints update notices to stderr before running CLI commands", async () => {
     const events: Array<{ stream: "stdout" | "stderr"; message: string }> = [];
     const originalLog = console.log;
@@ -233,6 +280,12 @@ describe("pipr CLI", () => {
     expect(action.stderr).toContain("unknown command 'action'");
     expect(webhook.stdout).toContain("--database <path>");
     expect(webhook.stdout).toContain("--repository <repository>");
+    expect(webhook.stdout).toContain("--run-store-dir <path>");
+    expect(webhook.stdout).toContain("--run-retention-days <days>");
+    expect(webhook.stdout).toContain("--run-max-bytes <bytes>");
+    expect(webhook.stdout).not.toContain('(default: "/var/lib/pipr/runs")');
+    expect(webhook.stdout).not.toContain('(default: "14")');
+    expect(webhook.stdout).not.toContain('(default: "5368709120")');
     expect(hostRun.stdout).toContain("--host <host>");
     expect(hostRun.stdout).toContain("--event <path>");
     expect(dryRun.stdout).toContain("--host <host>");

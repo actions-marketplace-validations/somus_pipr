@@ -10,7 +10,7 @@ import {
 } from "../review/progress.js";
 import type { ReviewStats } from "../review/review-stats.js";
 import { createReviewWorkTracker } from "../review/work-progress.js";
-import type { RuntimeLog } from "../shared/logging.js";
+import { type RuntimeLog, runLoggedPhase } from "../shared/logging.js";
 import type { SecretRedactor } from "../shared/secret-redaction.js";
 import type { ChangeRequestEventContext, PiprConfig } from "../types.js";
 
@@ -38,6 +38,10 @@ export async function startReviewProgress(options: {
     return undefined;
   }
   const publishProgress = publish;
+  const publishProgressWithTrace = (
+    input: Parameters<typeof publishProgress>[0],
+  ): ReturnType<typeof publishProgress> =>
+    runLoggedPhase(options.log, "publish review progress", () => publishProgress(input));
   const token = crypto.randomUUID();
   const reviewedHeadSha = options.event.change.head.sha;
   const startedAt = Date.now();
@@ -50,7 +54,7 @@ export async function startReviewProgress(options: {
   let failurePublication: Promise<"failed" | "superseded"> | undefined;
   const workTracker = createReviewWorkTracker();
   let lastPublishedWork = JSON.stringify(workTracker.snapshot());
-  const initial = await publishProgress({
+  const initial = await publishProgressWithTrace({
     change: options.event,
     reviewedHeadSha,
     renderBody(currentBody) {
@@ -92,7 +96,7 @@ export async function startReviewProgress(options: {
       const workKey = JSON.stringify(work);
       if (workKey === lastPublishedWork) continue;
       try {
-        const result = await publishProgress({
+        const result = await publishProgressWithTrace({
           change: options.event,
           reviewedHeadSha,
           expectedToken: token,
@@ -137,7 +141,7 @@ export async function startReviewProgress(options: {
     const reason = error instanceof Error ? error.message : String(error);
     const redactedReason = options.secretRedactor?.redact(reason).value ?? reason;
     try {
-      const result = await publishProgress({
+      const result = await publishProgressWithTrace({
         change: options.event,
         reviewedHeadSha,
         expectedToken: token,
@@ -189,7 +193,7 @@ export async function startReviewProgress(options: {
       await drainWorkPublication();
       if (superseded) throw new ReviewProgressSupersededError();
       workDirty = false;
-      const result = await publishProgress({
+      const result = await publishProgressWithTrace({
         change: options.event,
         reviewedHeadSha,
         expectedToken: token,

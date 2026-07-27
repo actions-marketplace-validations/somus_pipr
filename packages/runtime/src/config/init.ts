@@ -185,16 +185,28 @@ async function starterFiles(
     });
   }
   if (adapters.includes("azure-devops")) {
-    files.push({
-      relativePath: "azure-devops.pipr.env.example",
-      contents: starterAzureDevOpsWebhookEnvironment(recipe),
-    });
+    files.push(
+      {
+        relativePath: "azure-devops.pipr.env.example",
+        contents: starterAzureDevOpsWebhookEnvironment(recipe),
+      },
+      {
+        relativePath: "azure-pipelines.pipr.yml",
+        contents: starterAzureDevOpsPipeline(relativeConfigDir.split(path.sep).join("/"), recipe),
+      },
+    );
   }
   if (adapters.includes("bitbucket")) {
-    files.push({
-      relativePath: "bitbucket.pipr.env.example",
-      contents: starterBitbucketWebhookEnvironment(recipe),
-    });
+    files.push(
+      {
+        relativePath: "bitbucket.pipr.env.example",
+        contents: starterBitbucketWebhookEnvironment(recipe),
+      },
+      {
+        relativePath: "bitbucket-pipelines.yml",
+        contents: starterBitbucketPipeline(relativeConfigDir.split(path.sep).join("/"), recipe),
+      },
+    );
   }
   return files;
 }
@@ -236,6 +248,50 @@ function starterAzureDevOpsWebhookEnvironment(recipe?: string): string {
   return lines.join("\n");
 }
 
+function starterAzureDevOpsPipeline(relativeConfigDir: string, recipe?: string): string {
+  const secrets = officialInitRecipeWorkflowEnvSecrets(recipe);
+  const lines = [
+    "# Use only when this pipeline definition is immutable to pull request authors.",
+    "trigger: none",
+    "pr:",
+    "  branches:",
+    "    include:",
+    "      - '*'",
+    "pool:",
+    "  vmImage: ubuntu-latest",
+    "steps:",
+    "  - checkout: self",
+    "    fetchDepth: 0",
+    "  - bash: |",
+    "      docker run --rm \\",
+    '        --volume "$BUILD_SOURCESDIRECTORY:/workspace" \\',
+    "        --env TF_BUILD=true \\",
+    "        --env BUILD_SOURCESDIRECTORY=/workspace \\",
+    "        --env BUILD_BUILDID \\",
+    "        --env BUILD_REPOSITORY_ID \\",
+    "        --env SYSTEM_COLLECTIONURI \\",
+    "        --env SYSTEM_JOBID \\",
+    "        --env SYSTEM_PULLREQUEST_PULLREQUESTID \\",
+    "        --env SYSTEM_TEAMPROJECT \\",
+    "        --env SYSTEM_ACCESSTOKEN \\",
+  ];
+  for (const secret of secrets) {
+    lines.push(`        --env ${secret.env} \\`);
+  }
+  lines.push(
+    `        ${defaultGitLabImageRef} \\`,
+    `        host-run --host azure-devops --config-dir ${relativeConfigDir}`,
+    "    displayName: Run Pipr",
+    "    env:",
+    "      SYSTEM_ACCESSTOKEN: $(System.AccessToken)",
+  );
+  for (const secret of secrets) {
+    lines.push(`      ${secret.env}: $(${secret.env})`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 function starterBitbucketWebhookEnvironment(recipe?: string): string {
   const lines = [
     "# Copy these names into the trusted webhook runner's secret store.",
@@ -248,6 +304,27 @@ function starterBitbucketWebhookEnvironment(recipe?: string): string {
     "PIPR_WEBHOOK_SECRET=",
   ];
   for (const secret of officialInitRecipeWorkflowEnvSecrets(recipe)) lines.push(`${secret.env}=`);
+  lines.push("");
+  return lines.join("\n");
+}
+
+function starterBitbucketPipeline(relativeConfigDir: string, recipe?: string): string {
+  const lines = [
+    "# Use only when repository variables are not exposed to untrusted pipeline changes.",
+    "clone:",
+    "  depth: full",
+    "pipelines:",
+    "  pull-requests:",
+    "    '**':",
+    "      - step:",
+    "          name: Pipr review",
+    `          image: ${defaultGitLabImageRef}`,
+    "          script:",
+    `            - pipr host-run --host bitbucket --config-dir ${relativeConfigDir}`,
+  ];
+  for (const secret of officialInitRecipeWorkflowEnvSecrets(recipe)) {
+    lines.push(`          # Configure ${secret.env} as a secured repository variable.`);
+  }
   lines.push("");
   return lines.join("\n");
 }

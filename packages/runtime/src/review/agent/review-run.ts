@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import type { DurationInput, PiprRunContext, TaskContext } from "@usepipr/sdk";
 import {
   isBuiltinReadOnlyTool,
@@ -10,6 +11,11 @@ import { uniqBy } from "lodash-es";
 import { z } from "zod";
 import { shardDiffManifestForPrompt } from "../../diff/manifest-sharding.js";
 import type { DiffStructuralAnalysisLoader } from "../../diff/structural-analysis.js";
+import type {
+  AgentAttemptType,
+  RunAgentAttemptObserver,
+  RunObserver,
+} from "../../observability/types.js";
 import { type PiReadOnlyToolName, piReadOnlyToolNames } from "../../pi/contract.js";
 import type { PiCustomToolDefinition } from "../../pi/custom-tools.js";
 import {
@@ -60,6 +66,7 @@ export type RunReviewAgentOptions = {
   runOptions: Parameters<TaskContext["pi"]["run"]>[2];
   toolMode?: "read-only" | "none";
   allowOversizedCondensedManifest?: boolean;
+  shard?: { index: number; count: number };
   runtime: {
     workspace: string;
     config: PiprConfig;
@@ -72,10 +79,12 @@ export type RunReviewAgentOptions = {
     piAgentDir?: string;
     piRunner?: PiRunner;
     taskContext?: TaskContext;
+    taskName?: string;
     priorReviewState?: PriorReviewState;
     run: PiprRunContext;
     log?: RuntimeLog;
     piRunSink?: (run: PiRunStats) => void;
+    runObserver?: RunObserver;
     reviewWork?: {
       taskId: string;
       reviewerId: string;
@@ -146,6 +155,12 @@ export async function runReviewAgent(
         );
       } else {
         const runScheduled = async (piRunner: PiRunner): Promise<RunReviewAgentResult> => {
+          options.runtime.log?.info("diff manifest sharded", {
+            agent: options.agent.name ?? "anonymous-agent",
+            task: options.runtime.taskName,
+            kind: scheduled.kind,
+            shardCount: manifests.length,
+          });
           const results: RunReviewAgentResult[] = [];
           for (const [index, manifest] of manifests.entries()) {
             results.push(
@@ -154,6 +169,7 @@ export async function runReviewAgent(
                   ...options,
                   input: inputWithManifest(options.input, manifest),
                   allowOversizedCondensedManifest: true,
+                  shard: { index: index + 1, count: manifests.length },
                   runtime: { ...options.runtime, piRunner },
                 },
                 index + 1,
@@ -265,9 +281,15 @@ async function runReviewAgentOnce(options: RunReviewAgentOptions): Promise<RunRe
     const providerModels: string[] = [];
     let repairAttempted = false;
 
-    for (const provider of providers) {
+    for (const [providerIndex, provider] of providers.entries()) {
       providerModels.push(provider.model);
-      const attempt = await runAgentWithProvider(scopedOptions, provider, prompt, retry);
+      const attempt = await runAgentWithProvider(
+        scopedOptions,
+        provider,
+        prompt,
+        retry,
+        providerIndex === 0 ? "initial" : "fallback",
+      );
       repairAttempted ||= attempt.repairAttempted;
       if (attempt.ok) {
         return { value: attempt.value, repairAttempted, providerModels };
@@ -455,10 +477,12 @@ async function runAgentWithProvider(
   provider: ProviderConfig,
   prompt: string,
   retry: RetrySettings,
+  attemptType: "initial" | "fallback",
 ): Promise<AgentAttemptResult> {
   let output: string;
   try {
-    output = (await runPiWithTransientRetries(options, provider, prompt, retry)).stdout;
+    output = (await runPiWithTransientRetries(options, provider, prompt, retry, attemptType))
+      .stdout;
   } catch (error) {
     rethrowAgentRunBudgetExhaustion(error);
     return {
@@ -482,7 +506,9 @@ async function runAgentWithProvider(
       error: lastError,
     });
     try {
-      lastOutput = (await runPiWithTransientRetries(options, provider, repairPrompt, retry)).stdout;
+      lastOutput = (
+        await runPiWithTransientRetries(options, provider, repairPrompt, retry, "repair")
+      ).stdout;
     } catch (error) {
       rethrowAgentRunBudgetExhaustion(error);
       return {
@@ -518,11 +544,18 @@ async function runPiWithTransientRetries(
   provider: ProviderConfig,
   prompt: string,
   retry: RetrySettings,
+  attemptType: AgentAttemptType,
 ): Promise<PiRunResult> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= retry.transientFailure; attempt += 1) {
     try {
-      return await runPiForPrompt(options, provider, prompt);
+      return await runPiForPrompt(
+        options,
+        provider,
+        prompt,
+        attempt === 0 ? attemptType : "retry",
+        attempt + 1,
+      );
     } catch (error) {
       rethrowAgentRunBudgetExhaustion(error);
       lastError = error;
@@ -605,39 +638,145 @@ async function runPiForPrompt(
   options: RunReviewAgentOptions & PreparedAgentContext,
   provider: ProviderConfig,
   prompt: string,
+  attemptType: AgentAttemptType,
+  attemptNumber: number,
 ): Promise<PiRunResult> {
   reserveAgentRun(options.runtime.agentRunBudget);
   const builtinTools = builtinToolsForPrompt(options.toolMode ?? "read-only");
   const runtimeTools = runtimeToolsForRun(options);
   const customTools = customToolsForRun(options);
   const timeoutSeconds = promptTimeoutSeconds(options);
-  logPiStart(options, provider, prompt, builtinTools, runtimeTools, customTools);
+  const observedStarted = Date.now();
+  const attemptId = randomUUID();
+  const observedAttempt = await beginObservedAttempt(options, provider, prompt, {
+    attemptType,
+    attemptNumber,
+  });
+  logPiStart(
+    options,
+    provider,
+    prompt,
+    builtinTools,
+    runtimeTools,
+    customTools,
+    attemptType,
+    attemptNumber,
+    attemptId,
+  );
   let result: PiRunResult;
   try {
-    result = await (options.runtime.piRunner ?? runPi)({
-      workspace: options.runtime.workspace,
-      provider,
-      prompt,
-      env: options.runtime.env,
-      piExecutable: options.runtime.piExecutable,
-      piAgentDir: options.runtime.piAgentDir,
+    result = await executeObservedPi(options, provider, prompt, timeoutSeconds, {
       builtinTools,
       runtimeTools,
       customTools,
-      timeoutSeconds,
+      observedAttempt,
     });
   } catch (error) {
-    options.runtime.piRunSink?.({ models: [provider.model] });
+    await reportObservedPiFailure(
+      options,
+      provider,
+      observedAttempt,
+      observedStarted,
+      attemptType,
+      attemptNumber,
+      attemptId,
+      error,
+    );
     throw error;
   }
+  await reportObservedPiResult(
+    options,
+    provider,
+    observedAttempt,
+    result,
+    timeoutSeconds,
+    attemptType,
+    attemptNumber,
+    attemptId,
+  );
+  assertSuccessfulPiResult(result, options.runtime.log);
+  return result;
+}
+
+type ObservedAttempt = Awaited<ReturnType<typeof beginObservedAttempt>>;
+
+async function executeObservedPi(
+  options: RunReviewAgentOptions & PreparedAgentContext,
+  provider: ProviderConfig,
+  prompt: string,
+  timeoutSeconds: number | undefined,
+  tools: {
+    builtinTools: ReturnType<typeof builtinToolsForPrompt>;
+    runtimeTools: ReturnType<typeof runtimeToolsForRun>;
+    customTools: ReturnType<typeof customToolsForRun>;
+    observedAttempt: ObservedAttempt;
+  },
+): Promise<PiRunResult> {
+  return await (options.runtime.piRunner ?? runPi)({
+    workspace: options.runtime.workspace,
+    provider,
+    prompt,
+    env: options.runtime.env,
+    piExecutable: options.runtime.piExecutable,
+    piAgentDir: options.runtime.piAgentDir,
+    builtinTools: tools.builtinTools,
+    runtimeTools: tools.runtimeTools,
+    customTools: tools.customTools,
+    timeoutSeconds,
+    eventObserver: tools.observedAttempt
+      ? (event) => tools.observedAttempt?.event(event)
+      : undefined,
+  });
+}
+
+async function reportObservedPiFailure(
+  options: RunReviewAgentOptions & PreparedAgentContext,
+  provider: ProviderConfig,
+  observedAttempt: ObservedAttempt,
+  observedStarted: number,
+  attemptType: AgentAttemptType,
+  attemptNumber: number,
+  attemptId: string,
+  error: unknown,
+): Promise<void> {
+  options.runtime.piRunSink?.({ models: [provider.model] });
+  await finishObservedAttempt(options, observedAttempt, {
+    error: error instanceof Error ? error.message : String(error),
+    durationMs: Date.now() - observedStarted,
+  });
+  logPiFailure(
+    options,
+    provider,
+    attemptType,
+    attemptNumber,
+    attemptId,
+    Date.now() - observedStarted,
+  );
+}
+
+async function reportObservedPiResult(
+  options: RunReviewAgentOptions & PreparedAgentContext,
+  provider: ProviderConfig,
+  observedAttempt: ObservedAttempt,
+  result: PiRunResult,
+  timeoutSeconds: number | undefined,
+  attemptType: AgentAttemptType,
+  attemptNumber: number,
+  attemptId: string,
+): Promise<void> {
   const reportedModels = result.models?.map((model) => model.trim()).filter(Boolean);
   options.runtime.piRunSink?.({
     models: reportedModels?.length ? reportedModels : [provider.model],
     ...(result.usage ? { usage: result.usage } : {}),
   });
-  logPiResult(options, provider, result, timeoutSeconds);
-  assertSuccessfulPiResult(result, options.runtime.log);
-  return result;
+  logPiResult(options, provider, result, timeoutSeconds, attemptType, attemptNumber, attemptId);
+  await finishObservedAttempt(options, observedAttempt, {
+    output: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+    usage: result.usage,
+  });
 }
 
 function runtimeToolsForRun(
@@ -694,11 +833,18 @@ function logPiStart(
   builtinTools: readonly PiReadOnlyToolName[],
   runtimeTools: Parameters<typeof runPi>[0]["runtimeTools"],
   customTools: Parameters<typeof runPi>[0]["customTools"],
+  attemptType: AgentAttemptType,
+  attemptNumber: number,
+  attemptId: string,
 ): void {
   options.runtime.log?.info("pi start", {
     agent: options.agent.name ?? "anonymous-agent",
     provider: provider.id,
     model: provider.model,
+    attemptType,
+    attemptNumber,
+    attemptId,
+    ...attemptContextFields(options, provider),
     promptBytes: Buffer.byteLength(prompt, "utf8"),
     tools: [
       ...builtinTools,
@@ -713,18 +859,111 @@ function logPiResult(
   provider: ProviderConfig,
   result: PiRunResult,
   timeoutSeconds: number | undefined,
+  attemptType: AgentAttemptType,
+  attemptNumber: number,
+  attemptId: string,
 ): void {
   options.runtime.log?.info("pi run", {
     agent: options.agent.name ?? "anonymous-agent",
     provider: provider.id,
     model: provider.model,
+    attemptType,
+    attemptNumber,
+    attemptId,
+    ...attemptContextFields(options, provider),
     exitCode: result.exitCode,
     durationMs: result.durationMs,
     stdoutBytes: result.stdout.length,
     stderrBytes: result.stderr.length,
     timeoutSeconds,
     ...(result.stream ?? {}),
+    ...(result.usage
+      ? {
+          usageStatus: result.usage.status,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          costUsd: result.usage.costUsd,
+        }
+      : {}),
   });
+}
+
+function logPiFailure(
+  options: RunReviewAgentOptions & PreparedAgentContext,
+  provider: ProviderConfig,
+  attemptType: AgentAttemptType,
+  attemptNumber: number,
+  attemptId: string,
+  durationMs: number,
+): void {
+  options.runtime.log?.info("pi run", {
+    agent: options.agent.name ?? "anonymous-agent",
+    provider: provider.id,
+    model: provider.model,
+    attemptType,
+    attemptNumber,
+    attemptId,
+    ...attemptContextFields(options, provider),
+    exitCode: -1,
+    durationMs,
+    stdoutBytes: 0,
+    stderrBytes: 0,
+  });
+}
+
+async function beginObservedAttempt(
+  options: RunReviewAgentOptions & PreparedAgentContext,
+  provider: ProviderConfig,
+  prompt: string,
+  attempt: { attemptType: AgentAttemptType; attemptNumber: number },
+): Promise<RunAgentAttemptObserver | undefined> {
+  try {
+    return await options.runtime.runObserver?.beginAgentAttempt({
+      ...attempt,
+      agent: options.agent.name ?? "anonymous-agent",
+      task: options.runtime.taskName,
+      provider: provider.id,
+      model: provider.model,
+      authMode: provider.apiKeyEnv ? "api-key" : "subscription",
+      ...(options.shard
+        ? { shardIndex: options.shard.index, shardCount: options.shard.count }
+        : {}),
+      prompt,
+    });
+  } catch {
+    options.runtime.log?.warning("run capture attempt start failed", {
+      agent: options.agent.name ?? "anonymous-agent",
+      provider: provider.id,
+      model: provider.model,
+    });
+    return undefined;
+  }
+}
+
+function attemptContextFields(
+  options: RunReviewAgentOptions,
+  provider: ProviderConfig,
+): Record<string, string | number | undefined> {
+  return {
+    task: options.runtime.taskName,
+    authMode: provider.apiKeyEnv ? "api-key" : "subscription",
+    ...(options.shard ? { shardIndex: options.shard.index, shardCount: options.shard.count } : {}),
+  };
+}
+
+async function finishObservedAttempt(
+  options: RunReviewAgentOptions & PreparedAgentContext,
+  observer: RunAgentAttemptObserver | undefined,
+  result: Parameters<RunAgentAttemptObserver["finish"]>[0],
+): Promise<void> {
+  if (!observer) return;
+  try {
+    await observer.finish(result);
+  } catch {
+    options.runtime.log?.warning("run capture attempt finish failed", {
+      agent: options.agent.name ?? "anonymous-agent",
+    });
+  }
 }
 
 function builtinToolsForPrompt(toolMode: "read-only" | "none"): readonly PiReadOnlyToolName[] {

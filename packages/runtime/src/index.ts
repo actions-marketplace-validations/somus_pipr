@@ -29,6 +29,38 @@ export {
 } from "./host-run/commands.js";
 export type { WebhookDeliveryStatus, WebhookHost } from "./host-run/webhook-server.js";
 export { readWebhookDeliveryStatus, runWebhookServer } from "./host-run/webhook-server.js";
+export type {
+  DownloadedBundle,
+  RunArchiveSource,
+  RunDiagnosis,
+  RunQuery,
+  RunRecord,
+  RunRecordState,
+  RunRef,
+  ValidatedRunBundle,
+} from "./observability/archive.js";
+export {
+  copyValidatedRunBundle,
+  diagnoseRunBundle,
+  FileSystemRunArchiveSource,
+  loadValidatedRunBundle,
+} from "./observability/archive.js";
+export { GitHubRunArchiveSource } from "./observability/github-run-archive-source.js";
+export type {
+  OpenedRunBundlePackage,
+  PreparedRunBundlePackage,
+} from "./observability/protected-package.js";
+export {
+  copyRunBundlePackage,
+  generateRunBundleIdentity,
+  openRunBundlePackage,
+  parseRunBundleRecipients,
+  prepareRunBundlePackage,
+  validateRunBundlePackage,
+  validateRunBundleRecipients,
+} from "./observability/protected-package.js";
+export { enforceRunStoreRetention } from "./observability/retention.js";
+export { copyRunBundleInput } from "./observability/run-bundle-input.js";
 export type { PublicationResult } from "./review/publication-result.js";
 export { PublicationError } from "./review/publication-result.js";
 export type {

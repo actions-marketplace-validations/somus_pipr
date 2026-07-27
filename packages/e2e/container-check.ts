@@ -38,6 +38,7 @@ assertDockerImageExists(actionImage);
 await checkPiContract({ cwd: sourceRoot, image: actionImage });
 assertAstGrepContract(actionImage);
 assertWebhookEntrypoint(actionImage);
+assertRunStoreWritable(actionImage);
 await assertWebhookHealth(actionImage);
 
 for (const scenario of selectedScenarios) {
@@ -254,6 +255,25 @@ function assertWebhookEntrypoint(image: string): void {
   assertContains(output.stdout, "--database <path>");
   assertContains(output.stdout, "--hostname <hostname>");
   console.log("container webhook entrypoint ok");
+}
+
+function assertRunStoreWritable(image: string): void {
+  run(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--entrypoint",
+      "/bin/sh",
+      image,
+      "-c",
+      "test -d /var/lib/pipr/runs && test -w /var/lib/pipr/runs",
+    ],
+    sourceRoot,
+  );
+  console.log("container run store writable ok");
 }
 
 async function assertWebhookHealth(image: string): Promise<void> {

@@ -13,6 +13,12 @@ outputs:
     description: Rendered Main Review Comment body, command response body, or command help body
   result:
     description: Versioned JSON summary for every Pipr Action outcome
+  execution-id:
+    description: OTel trace ID for the captured Pipr process
+  run-bundle-path:
+    description: Workspace-relative path to the protected Run Bundle package
+  run-artifact-name:
+    description: GitHub Actions artifact name for the protected Run Bundle package
 runs:
   using: docker
   image: docker://ghcr.io/somus/pipr:v0.6.3 # x-release-please-version

@@ -13,13 +13,13 @@ Generate the Bitbucket worker environment template with the repository config.
 pipr init --adapters bitbucket
 ```
 
-The command creates `bitbucket.pipr.env.example`. Copy its variable names into the trusted runner's secret store and leave the checked-in example values empty.
+The command creates `bitbucket.pipr.env.example` and `bitbucket-pipelines.yml`. Copy the environment template's variable names into the trusted runner's secret store and leave the checked-in example values empty.
 
 ## Optional pull request pipeline
 
 Use Bitbucket Pipelines only for same-repository pull requests whose authors are trusted with pipeline variables. Pull request pipelines use source-controlled `bitbucket-pipelines.yml`, so a contributor who can change that file can replace the review command before Pipr starts. Fork pull requests don't trigger this pipeline; use the trusted webhook runner when the pipeline trust boundary is not sufficient.
 
-Add `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, and the configured model-provider key as secured repository variables. Then add this pull request pipeline:
+Add `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, and the configured model-provider key as secured repository variables. Then use this pull request pipeline:
 
 ```yaml
 image: ghcr.io/somus/pipr:v0.6.3 # x-release-please-version
