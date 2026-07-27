@@ -1,9 +1,11 @@
 import type { RuntimeTask } from "@usepipr/sdk/internal";
 import type { CodeHostAdapter } from "../hosts/types.js";
 import { publicationPlanForHostCapabilities } from "../review/comment.js";
+import { ReviewProgressSupersededError } from "../review/progress.js";
 import { type RuntimeCommandInvocation, runTaskRuntime } from "../review/task/task-runtime.js";
 import type { RuntimeLog } from "../shared/logging.js";
 import type { ChangeRequestEventContext } from "../types.js";
+import type { ReviewProgressReporter } from "./review-progress.js";
 import {
   finalizeRuntimeChecks,
   genericCheckFailureSummary,
@@ -24,6 +26,8 @@ export async function runTrustedReviewAndPublish(options: {
   taskInput?: unknown;
   selectedTasks: RuntimeTask[];
   commandInvocation?: RuntimeCommandInvocation;
+  workflowUrl?: string;
+  progress?: ReviewProgressReporter;
   log: RuntimeLog;
 }): Promise<TrustedReviewAndPublishResult> {
   const checks = await startRuntimeChecks({
@@ -35,6 +39,7 @@ export async function runTrustedReviewAndPublish(options: {
     log: options.log,
   });
   try {
+    if (checks?.startupError) throw checks.startupError;
     const review = await runTaskRuntime({
       workspace: options.options.rootDir,
       config: options.trustedRuntime.settings.config,
@@ -51,6 +56,8 @@ export async function runTrustedReviewAndPublish(options: {
       log: options.log,
       checkSink: checks?.sink,
       secretRedactor: options.options.secretRedactor,
+      workflowUrl: options.workflowUrl,
+      progress: options.progress,
       loadPriorReviewState: () =>
         options.adapter.comments?.loadPriorReviewState?.({ change: options.event }) ??
         Promise.resolve(undefined),
@@ -83,7 +90,9 @@ export async function runTrustedReviewAndPublish(options: {
     if (!publish) {
       throw new Error("review publication is not available for this code host");
     }
+    await finalizeRuntimeChecks(checks, {});
     const publication = await options.log.group("publish review", async () => {
+      await options.progress?.transition("publishing-review");
       const publicationPlan = publicationPlanForHostCapabilities(
         review.publicationPlan,
         options.adapter.capabilities,
@@ -95,6 +104,7 @@ export async function runTrustedReviewAndPublish(options: {
       const result = await publish({
         change: options.event,
         plan: publicationPlan,
+        progressLease: options.progress?.lease,
       });
       options.log.notice("publication result", {
         main: result.mainComment.action,
@@ -105,19 +115,28 @@ export async function runTrustedReviewAndPublish(options: {
       });
       return result;
     });
-    await finalizeRuntimeChecks(checks, {});
     return { kind: "completed", review, publication };
   } catch (error) {
+    let finalError = error;
+    if ((await options.progress?.fail(error)) === "superseded") {
+      finalError = new ReviewProgressSupersededError();
+    }
+    const superseded = finalError instanceof ReviewProgressSupersededError;
     await finalizeRuntimeChecks(checks, {
-      forceFailureSummary: genericCheckFailureSummary,
-      preserveTaskOutcomes: Array.from(checks?.outcomes.values() ?? []).some(
-        (result) => result.conclusion === "failure",
-      ),
+      superseded,
+      ...(superseded
+        ? {}
+        : {
+            forceFailureSummary: genericCheckFailureSummary,
+            preserveTaskOutcomes: Array.from(checks?.outcomes.values() ?? []).some(
+              (result) => result.conclusion === "failure",
+            ),
+          }),
     }).catch((finalizeError: unknown) => {
       options.log.warning("check finalization after failure failed", {
         error: finalizeError instanceof Error ? finalizeError.message : String(finalizeError),
       });
     });
-    throw error;
+    throw finalError;
   }
 }
