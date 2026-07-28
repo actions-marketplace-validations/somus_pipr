@@ -74,6 +74,8 @@ export async function runInitCommand(
     minimal: options.minimal,
     runtimeImage: options.runtimeImage,
     checkoutAction: options.checkoutAction,
+    githubRunner: options.githubRunner,
+    githubEnterpriseServer: options.githubEnterpriseServer,
   });
 }
 

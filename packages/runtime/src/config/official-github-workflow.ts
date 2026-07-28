@@ -4,6 +4,7 @@ import {
 } from "./recipes.js";
 
 const defaultWorkflowActionRef = "somus/pipr@v0.6.3"; // x-release-please-version
+const githubEnterpriseUploadArtifactAction = "actions/upload-artifact@v3.2.2-node20";
 
 export type RenderOfficialGithubWorkflowOptions = {
   relativeConfigDir?: string;
@@ -11,6 +12,8 @@ export type RenderOfficialGithubWorkflowOptions = {
   minimal?: boolean;
   runtimeImage?: string;
   checkoutAction?: string;
+  githubRunner?: string;
+  githubEnterpriseServer?: boolean;
   includeReleasePleaseVersionMarker?: boolean;
 };
 
@@ -19,6 +22,11 @@ export function renderOfficialGithubWorkflow(
   options: RenderOfficialGithubWorkflowOptions = {},
 ): string {
   const relativeConfigDir = options.relativeConfigDir ?? ".pipr";
+  const githubRunner = options.githubRunner
+    ? JSON.stringify(options.githubRunner)
+    : options.githubEnterpriseServer
+      ? "[self-hosted, linux]"
+      : JSON.stringify("ubuntu-latest");
   const lines = [
     "name: pipr",
     "",
@@ -42,7 +50,7 @@ export function renderOfficialGithubWorkflow(
     "",
     "jobs:",
     "  review:",
-    "    runs-on: ubuntu-latest",
+    `    runs-on: ${githubRunner}`,
     "    steps:",
     `      - uses: ${options.checkoutAction ?? "actions/checkout@v6"}`,
     "        with:",
@@ -85,7 +93,11 @@ export function renderOfficialGithubWorkflow(
   lines.push(
     "      - name: Upload Pipr run bundle",
     "        if: always() && steps.pipr.outputs.run-bundle-path != ''",
-    "        uses: actions/upload-artifact@v6",
+    `        uses: ${
+      options.githubEnterpriseServer
+        ? githubEnterpriseUploadArtifactAction
+        : "actions/upload-artifact@v6"
+    }`,
     "        with:",
     `          name: ${githubExpression("steps.pipr.outputs.run-artifact-name")}`,
     `          path: ${githubExpression("steps.pipr.outputs.run-bundle-path")}`,
