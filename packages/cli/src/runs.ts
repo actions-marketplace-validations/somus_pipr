@@ -631,9 +631,10 @@ function selectorFromUrl(value: string, explicitHost?: string): RunSelector | un
   const url = parseUrl(value);
   if (!url) return undefined;
   const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  const parsers = [githubUrlSelector, gitlabUrlSelector, azureUrlSelector, bitbucketUrlSelector];
+  const parsers = [githubUrlSelector, gitlabUrlSelector, azureUrlSelector];
   return (
     parsers.map((parse) => parse(url, parts)).find((result) => result !== undefined) ??
+    bitbucketUrlSelector(url, parts, explicitHost) ??
     giteaUrlSelector(url, parts, explicitHost)
   );
 }
@@ -665,11 +666,31 @@ const azureUrlSelector: UrlSelectorParser = (_url, parts) => {
   );
 };
 
-const bitbucketUrlSelector: UrlSelectorParser = (url, parts) => {
-  const bitbucketPull = parts.indexOf("pull-requests");
-  if (url.hostname !== "bitbucket.org" || bitbucketPull < 2) return undefined;
-  return selector("bitbucket", parts.slice(0, bitbucketPull).join("/"), parts[bitbucketPull + 1]);
-};
+function bitbucketUrlSelector(
+  url: URL,
+  parts: string[],
+  explicitHost?: string,
+): RunSelector | undefined {
+  const bitbucketPull = parts.lastIndexOf("pull-requests");
+  if (bitbucketPull < 2) return undefined;
+  if (url.hostname === "bitbucket.org") {
+    return selector("bitbucket", parts.slice(0, bitbucketPull).join("/"), parts[bitbucketPull + 1]);
+  }
+  const projects = bitbucketPull - 4;
+  const repositories = bitbucketPull - 2;
+  if (
+    explicitHost !== "bitbucket" ||
+    parts[projects] !== "projects" ||
+    parts[repositories] !== "repos"
+  ) {
+    return undefined;
+  }
+  return selector(
+    "bitbucket",
+    `${parts[projects + 1]}/${parts[repositories + 1]}`,
+    parts[bitbucketPull + 1],
+  );
+}
 
 function giteaUrlSelector(
   url: URL,

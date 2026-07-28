@@ -602,6 +602,37 @@ describe("run PR selector", () => {
     ).toEqual({ host: "bitbucket", repository: "workspace/pipr", changeNumber: 9 });
     expect(
       await resolveRunSelector({
+        pr: "https://bitbucket.example.com/projects/PRJ/repos/pipr/pull-requests/19/overview",
+        host: "bitbucket",
+        cwd: "/does/not/exist",
+      }),
+    ).toEqual({ host: "bitbucket", repository: "PRJ/pipr", changeNumber: 19 });
+    expect(
+      await resolveRunSelector({
+        pr: "https://bitbucket.example.com/context/projects/projects/repos/repos/pull-requests/20",
+        host: "bitbucket",
+        cwd: "/does/not/exist",
+      }),
+    ).toEqual({ host: "bitbucket", repository: "projects/repos", changeNumber: 20 });
+    expect(
+      await resolveRunSelector({
+        pr: "https://bitbucket.example.com/pull-requests/projects/PRJ/repos/pull-requests/pull-requests/21",
+        host: "bitbucket",
+        cwd: "/does/not/exist",
+      }),
+    ).toEqual({ host: "bitbucket", repository: "PRJ/pull-requests", changeNumber: 21 });
+    expect(
+      await resolveRunSelector({
+        pr: "https://bitbucket.org/workspace/pull-requests/pull-requests/22",
+        cwd: "/does/not/exist",
+      }),
+    ).toEqual({
+      host: "bitbucket",
+      repository: "workspace/pull-requests",
+      changeNumber: 22,
+    });
+    expect(
+      await resolveRunSelector({
         pr: "https://codeberg.org/somus/pipr/pulls/10",
         cwd: "/does/not/exist",
       }),
