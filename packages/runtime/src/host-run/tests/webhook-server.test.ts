@@ -301,6 +301,8 @@ describe("webhook runner", () => {
       secret: "webhook-secret",
       expectedRepository: {
         organization: "org",
+        collectionUrl: "https://dev.azure.com/org",
+        instanceId: "account-id",
         projectId: "project-id",
         repositoryId: "repo-id",
         subscriptionId: "subscription-1",
@@ -318,7 +320,8 @@ describe("webhook runner", () => {
           repository: { id: "repo-id", project: { id: "project-id" } },
         },
         resourceContainers: {
-          account: { baseUrl: "https://dev.azure.com/org/" },
+          account: { id: "account-id", baseUrl: "https://dev.azure.com/org/" },
+          collection: { id: "collection-id", baseUrl: "https://dev.azure.com/org/" },
           project: { id: "project-id" },
         },
         ...overrides,
@@ -354,6 +357,28 @@ describe("webhook runner", () => {
       expect((await ingress(basicRequest(authorization))).status).toBe(401);
     }
     expect(store.deliveries[0]?.id).toBe("azure-devops:subscription-1:event-1:4");
+    expect(
+      (
+        await ingress(
+          request(
+            payload({
+              id: "event-legacy-url",
+              resourceContainers: {
+                account: {
+                  id: "account-id",
+                  baseUrl: "https://org.visualstudio.com/DefaultCollection/",
+                },
+                collection: {
+                  id: "collection-id",
+                  baseUrl: "https://org.visualstudio.com/DefaultCollection/",
+                },
+                project: { id: "project-id" },
+              },
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(202);
     expect((await ingress(request(payload(), "wrong"))).status).toBe(401);
     expect(
       (await ingress(request(payload({ subscriptionId: "other-subscription", id: "event-2" }))))
@@ -374,6 +399,67 @@ describe("webhook runner", () => {
         )
       ).status,
     ).toBe(403);
+    expect(
+      (
+        await ingress(
+          request(
+            payload({
+              id: "event-4",
+              resourceContainers: {
+                account: { id: "account-id", baseUrl: "https://dev.azure.com/org/" },
+                collection: {
+                  id: "collection-id",
+                  baseUrl: "https://azure.example.test/tfs/org/",
+                },
+                project: { id: "project-id" },
+              },
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(403);
+  });
+
+  it("accepts Azure DevOps Server deliveries from the authenticated host instance", async () => {
+    const ingress = createWebhookIngress({
+      host: "azure-devops",
+      secret: "webhook-secret",
+      expectedRepository: {
+        organization: "DefaultCollection",
+        collectionUrl: "https://azure.example.test/tfs/DefaultCollection",
+        instanceId: "server-id",
+        projectId: "project-id",
+        repositoryId: "repo-id",
+        subscriptionId: "subscription-1",
+      },
+      store: new MemoryDeliveryStore(),
+    });
+    const payload = (instanceId = "server-id") =>
+      JSON.stringify({
+        id: `server-event-${instanceId}`,
+        eventType: "git.pullrequest.updated",
+        subscriptionId: "subscription-1",
+        notificationId: 4,
+        resource: {
+          pullRequestId: 7,
+          repository: { id: "repo-id", project: { id: "project-id" } },
+        },
+        resourceContainers: {
+          server: { id: instanceId },
+          collection: { id: "collection-id" },
+          project: { id: "project-id" },
+        },
+      });
+    const request = (instanceId?: string) =>
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        headers: { "X-Pipr-Webhook-Secret": "webhook-secret" },
+        body: payload(instanceId),
+      });
+
+    expect((await ingress(request())).status).toBe(202);
+    expect((await ingress(request())).status).toBe(200);
+    expect((await ingress(request("other-server"))).status).toBe(403);
   });
 
   it("validates Bitbucket HMAC signatures and repository binding", async () => {
