@@ -69,6 +69,29 @@ The workflow listens only for events that can start configured tasks or verifier
 
 The config still decides which tasks run. The workflow delivers events to `pipr host-run --host github`.
 
+## Use internal mirrors
+
+If GitHub runners can't reach public registries, mirror the Pipr image and checkout action, then generate a workflow with their internal references:
+
+```bash
+pipr init \
+  --checkout-action internal-actions/checkout@v6 \
+  --runtime-image registry.internal.example/pipr:v0.6.3 # x-release-please-version
+```
+
+The generated Pipr step uses the mirrored image directly and preserves the same `host-run --host github` command. The checkout value is an `OWNER/REPOSITORY@REF` on the GitHub instance running the workflow; it isn't a URL for another Git host. Keep the mirrored image on the same Pipr release as the CLI that generated the workflow.
+
+If GitHub uses a private certificate authority, install it on the runner so the checkout action can reach GitHub. The Pipr step runs inside the mirrored image, so a PEM installed only on the runner isn't visible there. Extend the image with the PEM and certificate environment variables:
+
+```dockerfile
+FROM ghcr.io/somus/pipr:v0.6.3 # x-release-please-version
+COPY internal-ca.pem /opt/pipr/certs/internal-ca.pem
+ENV NODE_EXTRA_CA_CERTS=/opt/pipr/certs/internal-ca.pem
+ENV GIT_SSL_CAINFO=/opt/pipr/certs/internal-ca.pem
+```
+
+Build and push that image to the internal registry, then pass its reference to `--runtime-image`. This makes the certificate available to Pipr's Node and Git processes inside the container.
+
 ## Trusted options
 
 The Action reads its trusted settings from workflow inputs and the base-commit config.

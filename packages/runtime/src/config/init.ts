@@ -1,4 +1,5 @@
 import { lstat, mkdir } from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { assertBunAvailable } from "./config-deps.js";
 import { renderOfficialGithubWorkflow } from "./official-github-workflow.js";
@@ -19,6 +20,8 @@ export type InitOfficialMinimalProjectOptions = {
   adapters?: readonly string[];
   recipe?: string;
   minimal?: boolean;
+  runtimeImage?: string;
+  checkoutAction?: string;
 };
 
 export type InitOfficialMinimalProjectResult = {
@@ -43,6 +46,10 @@ type StarterFile = {
 
 const defaultGitLabImageRef = "ghcr.io/somus/pipr:v0.6.3"; // x-release-please-version
 const defaultSdkVersion = "0.6.3"; // x-release-please-version
+const ociReferenceCharacters = /^[A-Za-z0-9[][A-Za-z0-9._/@:+\]-]*$/;
+const ociRepositoryComponent = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/;
+const ociRegistryWithPort = /^[a-z0-9]+(?:[.-][a-z0-9]+)*:[0-9]+$/;
+const ociTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 function resolveOfficialInitAdapters(adapters?: readonly string[]): OfficialInitAdapter[] {
   if (adapters === undefined) {
@@ -80,11 +87,16 @@ function unsupportedAdapterError(adapter: string): Error {
 export async function initOfficialMinimalProject(
   options: InitOfficialMinimalProjectOptions,
 ): Promise<InitOfficialMinimalProjectResult> {
+  assertRuntimeImageReference(options.runtimeImage);
+  assertCheckoutActionReference(options.checkoutAction);
   const { configDir, relativeConfigDir, projectDir } = resolveContainedConfigDir(options);
   const adapters = resolveOfficialInitAdapters(options.adapters);
   const rootDir = path.resolve(options.rootDir);
   const minimal = options.minimal === true;
-  const files = await starterFiles(relativeConfigDir, adapters, options.recipe, minimal);
+  const files = await starterFiles(relativeConfigDir, adapters, options.recipe, minimal, {
+    runtimeImage: options.runtimeImage,
+    checkoutAction: options.checkoutAction,
+  });
   const targets = files.map((file) => ({
     ...file,
     absolutePath: path.join(rootDir, file.relativePath),
@@ -130,6 +142,87 @@ export async function initOfficialMinimalProject(
   return { configDir, ...result };
 }
 
+function assertRuntimeImageReference(value: string | undefined): void {
+  if (value === undefined) return;
+  const { repository, tag, digest } = parseOciImageReference(value);
+  if (
+    !isValidOciRepository(repository) ||
+    !isValidOciTag(tag) ||
+    !isValidOptionalOciDigest(digest)
+  ) {
+    throw invalidRuntimeImageReference();
+  }
+}
+
+function parseOciImageReference(value: string): {
+  repository: string;
+  tag: string | undefined;
+  digest: string | undefined;
+} {
+  if (!ociReferenceCharacters.test(value) || value.includes("://")) {
+    throw invalidRuntimeImageReference();
+  }
+  const [nameAndTag, digest, extra] = value.split("@");
+  if (extra !== undefined) throw invalidRuntimeImageReference();
+  const lastSlash = nameAndTag.lastIndexOf("/");
+  const tagSeparator = nameAndTag.lastIndexOf(":");
+  const repository = tagSeparator > lastSlash ? nameAndTag.slice(0, tagSeparator) : nameAndTag;
+  const tag = tagSeparator > lastSlash ? nameAndTag.slice(tagSeparator + 1) : undefined;
+  return { repository, tag, digest };
+}
+
+function invalidRuntimeImageReference(): Error {
+  return new Error("The runtime image reference is not a valid OCI image reference.");
+}
+
+function assertCheckoutActionReference(value: string | undefined): void {
+  if (value === undefined) return;
+  const at = value.indexOf("@");
+  const actionPath = value.slice(0, at);
+  const actionRef = value.slice(at + 1);
+  const pathComponents = actionPath.split("/");
+  if (
+    at <= 0 ||
+    at !== value.lastIndexOf("@") ||
+    pathComponents.length < 2 ||
+    pathComponents.some(
+      (component) =>
+        component === "." || component === ".." || !/^[A-Za-z0-9_.-]+$/.test(component),
+    ) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._/+-]*$/.test(actionRef) ||
+    actionRef.includes("//") ||
+    actionRef.endsWith("/")
+  ) {
+    throw new Error("The checkout action reference must use OWNER/REPOSITORY[/PATH]@REF.");
+  }
+}
+
+function isBracketedIpv6Registry(component: string): boolean {
+  const match = component.match(/^\[([0-9A-Fa-f:.]+)\](?::[0-9]+)?$/);
+  return match !== null && isIP(match[1]) === 6;
+}
+
+function isValidOciRepository(repository: string): boolean {
+  return repository.split("/").every((component, index) => {
+    if (index === 0 && component.includes(":")) {
+      return ociRegistryWithPort.test(component) || isBracketedIpv6Registry(component);
+    }
+    return ociRepositoryComponent.test(component);
+  });
+}
+
+function isValidOciTag(tag: string | undefined): boolean {
+  return tag === undefined || ociTag.test(tag);
+}
+
+function isValidOptionalOciDigest(digest: string | undefined): boolean {
+  if (digest === undefined) return true;
+  const match = digest.match(/^(sha256|sha384|sha512):([a-f0-9]+)$/);
+  if (match === null) return false;
+  const encodedLengths = { sha256: 64, sha384: 96, sha512: 128 } as const;
+  return match[2].length === encodedLengths[match[1] as keyof typeof encodedLengths];
+}
+
 function initInstallCommand(env: NodeJS.ProcessEnv = process.env): string[] {
   const command = ["bun", "install", "--ignore-scripts"];
   if (env.PIPR_INTERNAL_INIT_OFFLINE === "1") command.push("--offline");
@@ -141,6 +234,7 @@ async function starterFiles(
   adapters: readonly OfficialInitAdapter[],
   recipe?: string,
   minimal = false,
+  setup: { runtimeImage?: string; checkoutAction?: string } = {},
 ): Promise<StarterFile[]> {
   const files: StarterFile[] = [
     {
@@ -175,13 +269,19 @@ async function starterFiles(
         relativeConfigDir: relativeConfigDir.split(path.sep).join("/"),
         recipe,
         minimal,
+        runtimeImage: setup.runtimeImage,
+        checkoutAction: setup.checkoutAction,
       }),
     });
   }
   if (adapters.includes("gitlab")) {
     files.push({
       relativePath: ".gitlab-ci.yml",
-      contents: starterGitLabPipeline(relativeConfigDir.split(path.sep).join("/"), recipe),
+      contents: starterGitLabPipeline(
+        relativeConfigDir.split(path.sep).join("/"),
+        recipe,
+        setup.runtimeImage,
+      ),
     });
   }
   if (adapters.includes("azure-devops")) {
@@ -192,7 +292,11 @@ async function starterFiles(
       },
       {
         relativePath: "azure-pipelines.pipr.yml",
-        contents: starterAzureDevOpsPipeline(relativeConfigDir.split(path.sep).join("/"), recipe),
+        contents: starterAzureDevOpsPipeline(
+          relativeConfigDir.split(path.sep).join("/"),
+          recipe,
+          setup.runtimeImage,
+        ),
       },
     );
   }
@@ -204,18 +308,26 @@ async function starterFiles(
       },
       {
         relativePath: "bitbucket-pipelines.yml",
-        contents: starterBitbucketPipeline(relativeConfigDir.split(path.sep).join("/"), recipe),
+        contents: starterBitbucketPipeline(
+          relativeConfigDir.split(path.sep).join("/"),
+          recipe,
+          setup.runtimeImage,
+        ),
       },
     );
   }
   return files;
 }
 
-function starterGitLabPipeline(relativeConfigDir: string, recipe?: string): string {
+function starterGitLabPipeline(
+  relativeConfigDir: string,
+  recipe?: string,
+  runtimeImage = defaultGitLabImageRef,
+): string {
   const lines = [
     "pipr:",
     "  image:",
-    `    name: ${defaultGitLabImageRef}`,
+    `    name: '${runtimeImage}'`,
     '    entrypoint: [""]',
     "  rules:",
     "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'",
@@ -248,7 +360,11 @@ function starterAzureDevOpsWebhookEnvironment(recipe?: string): string {
   return lines.join("\n");
 }
 
-function starterAzureDevOpsPipeline(relativeConfigDir: string, recipe?: string): string {
+function starterAzureDevOpsPipeline(
+  relativeConfigDir: string,
+  recipe?: string,
+  runtimeImage = defaultGitLabImageRef,
+): string {
   const secrets = officialInitRecipeWorkflowEnvSecrets(recipe);
   const lines = [
     "# Use only when this pipeline definition is immutable to pull request authors.",
@@ -279,7 +395,7 @@ function starterAzureDevOpsPipeline(relativeConfigDir: string, recipe?: string):
     lines.push(`        --env ${secret.env} \\`);
   }
   lines.push(
-    `        ${defaultGitLabImageRef} \\`,
+    `        '${runtimeImage}' \\`,
     `        host-run --host azure-devops --config-dir ${relativeConfigDir}`,
     "    displayName: Run Pipr",
     "    env:",
@@ -308,7 +424,11 @@ function starterBitbucketWebhookEnvironment(recipe?: string): string {
   return lines.join("\n");
 }
 
-function starterBitbucketPipeline(relativeConfigDir: string, recipe?: string): string {
+function starterBitbucketPipeline(
+  relativeConfigDir: string,
+  recipe?: string,
+  runtimeImage = defaultGitLabImageRef,
+): string {
   const lines = [
     "# Use only when repository variables are not exposed to untrusted pipeline changes.",
     "clone:",
@@ -318,7 +438,7 @@ function starterBitbucketPipeline(relativeConfigDir: string, recipe?: string): s
     "    '**':",
     "      - step:",
     "          name: Pipr review",
-    `          image: ${defaultGitLabImageRef}`,
+    `          image: '${runtimeImage}'`,
     "          script:",
     `            - pipr host-run --host bitbucket --config-dir ${relativeConfigDir}`,
   ];
