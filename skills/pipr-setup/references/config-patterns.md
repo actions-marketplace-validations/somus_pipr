@@ -7,14 +7,14 @@ Use these patterns when customizing `.pipr/config.ts`.
 | Command                                                                 | Use                                                                                                                                           |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pipr init`                                                             | Create `.pipr/config.ts`, `.pipr/package.json`, `.pipr/bun.lock`, `.pipr/tsconfig.json`, `.pipr/.gitignore`, and the default GitHub workflow. |
-| `pipr init --adapters <list>`                                           | Generate selected adapter artifacts for `github`, `gitlab`, `azure-devops`, or `bitbucket`; use `none` to skip adapter files.                 |
+| `pipr init --adapters <list>`                                           | Generate selected adapter artifacts for `github`, `gitlab`, `azure-devops`, `bitbucket`, `gitea`, `forgejo`, or `codeberg`; use `none` to skip adapter files. |
 | `pipr init --minimal`                                                   | Create only `.pipr/config.ts`; editor types come from a repo-root `@usepipr/sdk` install.                                                     |
 | `pipr inspect`                                                          | Print models, agents, tasks, commands, tools, publication settings, checks, and limits.                                                       |
 | `pipr check`                                                            | Type-load config and validate the runtime plan.                                                                                               |
 | `pipr check --require-env`                                              | Also require configured provider env vars.                                                                                                    |
 | `pipr review --base <ref>`                                              | Run change-request tasks locally without publishing comments.                                                                                 |
 | `pipr dry-run --host <host> --event <path>`                             | Load a native provider event and config without model calls or publication.                                                                   |
-| `pipr webhook serve --host <host> --workspace <path> --repository <id>` | Run trusted webhook ingress for GitLab, Azure DevOps, or Bitbucket.                                                                           |
+| `pipr webhook serve --host <host> --workspace <path> --repository <id>` | Run trusted webhook ingress for GitLab, Azure DevOps, Bitbucket, Gitea, Forgejo, or Codeberg.                                                  |
 
 ## Model and review basics
 
