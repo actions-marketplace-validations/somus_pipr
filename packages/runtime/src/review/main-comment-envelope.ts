@@ -16,7 +16,7 @@ const generatedReviewStatsShape = [
   /^\| --- \| ---: \|$/,
   /^\| Models \| .+ \|$/,
   /^\| Agent runs \| \d+ \|$/,
-  /^\| Elapsed \| .+ \|$/,
+  /^\| (?:Elapsed|Combined runtime) \| .+ \|$/,
   /^\| Input tokens \| (?:Unavailable|[\d,]+(?: \(reported\))?) \|$/,
   /^\| Output tokens \| (?:Unavailable|[\d,]+(?: \(reported\))?) \|$/,
   /^\| Cost \(USD\) \| (?:Unavailable|\$\d+(?:\.\d+)?(?:e[+-]?\d+)?(?: \(reported\))?) \|$/,
@@ -103,7 +103,7 @@ function isGeneratedReviewStatsEnvelope(lines: string[], start: number, end: num
   return (
     start >= 0 &&
     lines[start + 1] === "<details>" &&
-    /^<summary>(?:Review stats|(?:📊 )?Review completed in .+)<\/summary>$/.test(
+    /^<summary>(?:Review stats|(?:📊 )?(?:Review completed in .+|\d+ workflow runs completed: .+ combined))<\/summary>$/.test(
       lines[start + 2] ?? "",
     ) &&
     matchesGeneratedReviewStatsShape(lines, start, end)

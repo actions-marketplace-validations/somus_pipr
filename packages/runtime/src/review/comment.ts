@@ -412,10 +412,15 @@ function renderReviewResult(validFindings: number): string {
 }
 
 function renderReviewStats(stats: ReviewStats, workflowUrls?: string[]): string {
+  const workflowRunCount = workflowUrls?.length ?? 0;
+  const summary =
+    workflowRunCount > 1
+      ? `${workflowRunCount} workflow runs completed: ${formatReviewDuration(stats.durationMs)} combined`
+      : `Review completed in ${formatReviewDuration(stats.durationMs)}`;
   return [
     reviewStatsStartMarker,
     "<details>",
-    `<summary>📊 Review completed in ${formatReviewDuration(stats.durationMs)}</summary>`,
+    `<summary>📊 ${summary}</summary>`,
     "",
     ...renderReviewStatsTable(stats, workflowUrls),
     "",
@@ -427,12 +432,13 @@ function renderReviewStats(stats: ReviewStats, workflowUrls?: string[]): string 
 export function renderReviewStatsTable(stats: ReviewStats, workflowUrls?: string[]): string[] {
   const usageSuffix = stats.usageStatus === "partial" ? " (reported)" : "";
   const usageUnavailable = stats.usageStatus === "unavailable";
+  const durationLabel = workflowUrls && workflowUrls.length > 1 ? "Combined runtime" : "Elapsed";
   return [
     "| Metric | Total |",
     "| --- | ---: |",
     `| Models | ${stats.models.map(formatModel).join(", ")} |`,
     `| Agent runs | ${stats.agentRuns} |`,
-    `| Elapsed | ${formatReviewDuration(stats.durationMs)} |`,
+    `| ${durationLabel} | ${formatReviewDuration(stats.durationMs)} |`,
     `| Input tokens | ${usageUnavailable ? "Unavailable" : `${formatInteger(stats.inputTokens)}${usageSuffix}`} |`,
     `| Output tokens | ${usageUnavailable ? "Unavailable" : `${formatInteger(stats.outputTokens)}${usageSuffix}`} |`,
     `| Cost (USD) | ${usageUnavailable ? "Unavailable" : `${formatCost(stats.costUsd)}${usageSuffix}`} |`,

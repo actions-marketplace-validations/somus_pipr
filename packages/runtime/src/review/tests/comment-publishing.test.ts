@@ -123,8 +123,8 @@ describe("buildCommentPublishingPlan", () => {
   it("lists every workflow run contributing to accumulated review stats", () => {
     const stats = {
       models: ["deepseek-v4-pro"],
-      agentRuns: 1,
-      durationMs: 1_000,
+      agentRuns: 2,
+      durationMs: 214_633,
       inputTokens: 100,
       outputTokens: 10,
       costUsd: 0.001,
@@ -153,13 +153,30 @@ describe("buildCommentPublishingPlan", () => {
         workflowUrl: "https://github.com/acme/repo/actions/runs/102",
       },
     });
+    const third = buildCommentPublishingPlan({
+      event,
+      main: "Third review.",
+      validated: { ...validated, validFindings: [] },
+      manifest,
+      priorReviewState: second.publicationPlan.reviewState,
+      metadata: {
+        ...metadata({ validFindings: 0 }),
+        stats: { ...stats, durationMs: 214_634 },
+        workflowUrl: "https://github.com/acme/repo/actions/runs/103",
+      },
+    });
 
-    expect(second.publicationPlan.mainComment).toContain(
-      "| Workflow runs | [Run 1](<https://github.com/acme/repo/actions/runs/101>), [Run 2](<https://github.com/acme/repo/actions/runs/102>) |",
+    expect(third.publicationPlan.mainComment).toContain(
+      "<summary>📊 3 workflow runs completed: 10m 43.9s combined</summary>",
     );
-    expect(second.publicationPlan.reviewState.workflowUrls).toEqual([
+    expect(third.publicationPlan.mainComment).toContain("| Combined runtime | 10m 43.9s |");
+    expect(third.publicationPlan.mainComment).toContain(
+      "| Workflow runs | [Run 1](<https://github.com/acme/repo/actions/runs/101>), [Run 2](<https://github.com/acme/repo/actions/runs/102>), [Run 3](<https://github.com/acme/repo/actions/runs/103>) |",
+    );
+    expect(third.publicationPlan.reviewState.workflowUrls).toEqual([
       "https://github.com/acme/repo/actions/runs/101",
       "https://github.com/acme/repo/actions/runs/102",
+      "https://github.com/acme/repo/actions/runs/103",
     ]);
   });
 
