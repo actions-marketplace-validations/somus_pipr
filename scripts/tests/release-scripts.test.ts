@@ -18,11 +18,6 @@ import typeScriptPackage from "typescript/package.json" with { type: "json" };
 import { releaseAssetForPlatform, releaseTargets } from "../../packages/cli/src/release/targets.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const dogfoodPrStateLookup = [
-  'pr_state="$(gh pr list --head "$branch" --state all --limit 1 --json state --jq ',
-  "'.[0].state // \"\"'",
-  ')"',
-].join("");
 const excludedFixturePaths = new Set([
   ".cache",
   ".git",
@@ -33,6 +28,7 @@ const excludedFixturePaths = new Set([
 ]);
 
 type Workflow = {
+  env?: Record<string, string>;
   on: {
     schedule?: Array<{ cron: string }>;
     workflow_dispatch?: unknown;
@@ -40,9 +36,11 @@ type Workflow = {
   jobs: Record<
     string,
     {
+      env?: Record<string, string>;
       if?: string;
       needs?: string | string[];
       outputs?: Record<string, string>;
+      permissions?: Record<string, string>;
       steps?: Array<{
         "continue-on-error"?: boolean;
         env?: Record<string, string>;
@@ -349,25 +347,25 @@ describe("developer checks", () => {
     const rootPackageJson = JSON.parse(
       readFileSync(path.join(repoRoot, "package.json"), "utf8"),
     ) as {
-      catalog?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-      scripts?: Record<string, string>;
+      catalog: Record<string, string>;
+      devDependencies: Record<string, string>;
+      scripts: Record<string, string>;
     };
     const runtimePackageJson = JSON.parse(
       readFileSync(path.join(repoRoot, "packages/runtime/package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string>; scripts?: Record<string, string> };
+    ) as { dependencies: Record<string, string>; scripts: Record<string, string> };
     const docsPackageJson = JSON.parse(
       readFileSync(path.join(repoRoot, "apps/docs/package.json"), "utf8"),
-    ) as { devDependencies?: Record<string, string>; scripts?: Record<string, string> };
+    ) as { devDependencies: Record<string, string>; scripts: Record<string, string> };
     const runtimeBuildTsconfig = JSON.parse(
       readFileSync(path.join(repoRoot, "packages/runtime/tsconfig.build.json"), "utf8"),
-    ) as { compilerOptions?: { paths?: Record<string, string[]> } };
+    ) as { compilerOptions: { paths: Record<string, string[]> } };
     const cliPackageJson = JSON.parse(
       readFileSync(path.join(repoRoot, "packages/cli/package.json"), "utf8"),
-    ) as { scripts?: Record<string, string> };
+    ) as { scripts: Record<string, string> };
     const cliBuildTsconfig = JSON.parse(
       readFileSync(path.join(repoRoot, "packages/cli/tsconfig.build.json"), "utf8"),
-    ) as { compilerOptions?: { paths?: Record<string, string[]> } };
+    ) as { compilerOptions: { paths: Record<string, string[]> } };
     const typecheckCommand = "tsc --noEmit";
     const typecheckScripts = [
       ["package.json", "typecheck:root"],
@@ -377,28 +375,28 @@ describe("developer checks", () => {
       ["packages/sdk/package.json", "typecheck"],
     ] as const;
 
-    expect(rootPackageJson.catalog?.typescript).toBe("7.0.2");
-    expect(rootPackageJson.devDependencies?.["@typescript/native"]).toBeUndefined();
-    expect(rootPackageJson.devDependencies?.typescript6).toBe("npm:typescript@6.0.3");
+    expect(rootPackageJson.catalog.typescript).toBe("7.0.2");
+    expect(rootPackageJson.devDependencies["@typescript/native"]).toBeUndefined();
+    expect(rootPackageJson.devDependencies.typescript6).toBe("npm:typescript@6.0.3");
     expect(typeScriptPackage.version).toBe("7.0.2");
-    expect(runtimePackageJson.dependencies?.typescript6).toBe("npm:typescript@6.0.3");
-    expect(runtimePackageJson.dependencies?.typescript).toBeUndefined();
-    expect(docsPackageJson.devDependencies?.typescript).toBe("6.0.3");
-    expect(docsPackageJson.scripts?.["typecheck:generated"]).toBe(
+    expect(runtimePackageJson.dependencies.typescript6).toBe("npm:typescript@6.0.3");
+    expect(runtimePackageJson.dependencies.typescript).toBeUndefined();
+    expect(docsPackageJson.devDependencies.typescript).toBe("6.0.3");
+    expect(docsPackageJson.scripts["typecheck:generated"]).toBe(
       "bun ../../node_modules/typescript/bin/tsc --noEmit",
     );
-    expect(runtimePackageJson.scripts?.typecheck).toBe(
+    expect(runtimePackageJson.scripts.typecheck).toBe(
       "bun ../../node_modules/typescript/bin/tsc --noEmit",
     );
-    expect(runtimePackageJson.scripts?.build).toContain("--tsconfig tsconfig.build.json");
-    expect(runtimeBuildTsconfig.compilerOptions?.paths).toEqual({});
-    expect(cliPackageJson.scripts?.build).toContain("--tsconfig tsconfig.build.json");
-    expect(cliBuildTsconfig.compilerOptions?.paths).toEqual({});
+    expect(runtimePackageJson.scripts.build).toContain("--tsconfig tsconfig.build.json");
+    expect(runtimeBuildTsconfig.compilerOptions.paths).toEqual({});
+    expect(cliPackageJson.scripts.build).toContain("--tsconfig tsconfig.build.json");
+    expect(cliBuildTsconfig.compilerOptions.paths).toEqual({});
     for (const [packagePath, script] of typecheckScripts) {
       const packageJson = JSON.parse(readFileSync(path.join(repoRoot, packagePath), "utf8")) as {
-        scripts?: Record<string, string>;
+        scripts: Record<string, string>;
       };
-      expect(packageJson.scripts?.[script]).toBe(typecheckCommand);
+      expect(packageJson.scripts[script]).toBe(typecheckCommand);
     }
 
     const version = Bun.spawnSync(["bun", "run", "tsc", "--version"], { cwd: repoRoot });
@@ -409,25 +407,23 @@ describe("developer checks", () => {
   it("serializes docs type generation through the Turbo graph", () => {
     const rootPackageJson = JSON.parse(
       readFileSync(path.join(repoRoot, "package.json"), "utf8"),
-    ) as {
-      scripts?: Record<string, string>;
-    };
+    ) as { scripts: Record<string, string> };
     const packageJson = JSON.parse(
       readFileSync(path.join(repoRoot, "apps/docs/package.json"), "utf8"),
-    ) as { scripts?: Record<string, string> };
+    ) as { scripts: Record<string, string> };
     const turbo = JSON.parse(readFileSync(path.join(repoRoot, "apps/docs/turbo.json"), "utf8")) as {
-      tasks?: Record<string, { dependsOn?: string[] }>;
+      tasks: Record<string, { dependsOn: string[] }>;
     };
 
-    expect(packageJson.scripts?.build).toContain("typegen");
-    expect(packageJson.scripts?.typecheck).toContain("typegen");
-    expect(packageJson.scripts?.test).toContain("typegen");
-    expect(rootPackageJson.scripts?.["check:docs"]).toContain("build:generated");
-    expect(rootPackageJson.scripts?.["check:docs"]).toContain("typecheck:generated");
-    expect(rootPackageJson.scripts?.["check:docs"]).toContain("test:generated");
-    expect(turbo.tasks?.["build:generated"]?.dependsOn).toContain("typegen");
-    expect(turbo.tasks?.["typecheck:generated"]?.dependsOn).toContain("typegen");
-    expect(turbo.tasks?.["test:generated"]?.dependsOn).toContain("typegen");
+    expect(packageJson.scripts.build).toContain("typegen");
+    expect(packageJson.scripts.typecheck).toContain("typegen");
+    expect(packageJson.scripts.test).toContain("typegen");
+    expect(rootPackageJson.scripts["check:docs"]).toContain("build:generated");
+    expect(rootPackageJson.scripts["check:docs"]).toContain("typecheck:generated");
+    expect(rootPackageJson.scripts["check:docs"]).toContain("test:generated");
+    expect(turbo.tasks["build:generated"].dependsOn).toContain("typegen");
+    expect(turbo.tasks["typecheck:generated"].dependsOn).toContain("typegen");
+    expect(turbo.tasks["test:generated"].dependsOn).toContain("typegen");
   });
 
   it("keeps the full check explicit while removing automatic pre-push checks", () => {
@@ -943,6 +939,25 @@ describe("check-release-metadata", () => {
     expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
   });
 
+  it("rejects release tag verification after package publication", () => {
+    const repository = copyRepositoryFixture();
+    const workflowPath = path.join(repository, ".github/workflows/release.yml");
+    const verificationStep = [
+      "      - name: Verify release tag metadata",
+      "        id: version",
+      "        run: bun scripts/release.ts verify-tag",
+      "",
+    ].join("\n");
+    const firstPublish =
+      '      - run: npm publish "dist/npm/usepipr-sdk-${{ steps.version.outputs.version }}.tgz" --access public\n';
+    const workflow = readFileSync(workflowPath, "utf8")
+      .replace(verificationStep, "")
+      .replace(firstPublish, `${firstPublish}${verificationStep}`);
+    write(workflowPath, workflow);
+
+    expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
+  });
+
   it("rejects a missing release artifact verification step", () => {
     const repository = copyRepositoryFixture();
     const workflowPath = path.join(repository, ".github/workflows/release.yml");
@@ -1028,107 +1043,53 @@ describe("check-release-metadata", () => {
     expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
   });
 
-  it("adds the self-review workflow to the post-publish dogfood update PR", () => {
-    const releaseWorkflow = readFileSync(
-      path.join(repoRoot, ".github/workflows/release.yml"),
-      "utf8",
+  it("keeps the security-sensitive publish pipeline declarative and ordered", () => {
+    const workflow = parseWorkflow(".github/workflows/release.yml");
+    const publishSteps = workflow.jobs.publish?.steps ?? [];
+    const publishRuns = publishSteps.map((step) => step.run);
+    const dogfoodStep = workflow.jobs.dogfood?.steps?.find(
+      (step) => step.name === "Open dogfood SDK update PR",
     );
+    const publicationOrder = [
+      publishSteps.findIndex((step) => step.id === "version"),
+      publishRuns.indexOf("bun run build:release:cli"),
+      publishRuns.indexOf("bun run check:release-artifacts"),
+      publishRuns.indexOf("bun run check:npm-tarballs"),
+      publishRuns.indexOf("bun run docker:e2e"),
+      publishRuns.indexOf(
+        'npm publish "dist/npm/usepipr-sdk-${{ steps.version.outputs.version }}.tgz" --access public',
+      ),
+      publishRuns.indexOf(
+        'npm publish "dist/npm/usepipr-runtime-${{ steps.version.outputs.version }}.tgz" --access public',
+      ),
+      publishRuns.indexOf(
+        'npm publish "dist/npm/usepipr-cli-${{ steps.version.outputs.version }}.tgz" --access public',
+      ),
+      publishSteps.findIndex((step) => step.run?.includes("gh release upload")),
+      publishSteps.findIndex(
+        (step) => step.name === "Publish GHCR image" && step.with?.push === true,
+      ),
+    ];
 
-    expect(releaseWorkflow).toContain("bun run sync:release-lockfile");
-    expect(releaseWorkflow).toContain(
-      "git add .pipr/package.json .pipr/bun.lock .github/workflows/pipr.yml",
-    );
+    expect(publicationOrder).toEqual([...publicationOrder].sort((left, right) => left - right));
+    expect(publicationOrder[0]).toBeGreaterThan(-1);
+    expect(workflow.env?.TURBO_TOKEN).toBeUndefined();
+    expect(workflow.jobs.resolve?.permissions).toEqual({ contents: "read" });
+    expect(workflow.jobs.publish?.env?.TURBO_TOKEN).toContain("secrets.TURBO_TOKEN");
+    expect(workflow.jobs.dogfood?.needs).toBe("publish");
+    expect(dogfoodStep?.run).toBe("bun scripts/release.ts dogfood");
+    expect(dogfoodStep?.env?.GH_TOKEN).toContain("PIPR_RELEASE_PLEASE_TOKEN");
   });
 
-  it("rejects a post-publish dogfood PR that omits the self-review workflow", () => {
+  it("rejects protected-main commands in the dogfood workflow step", () => {
     const repository = copyRepositoryFixture();
     const workflowPath = path.join(repository, ".github/workflows/release.yml");
     write(
       workflowPath,
       readFileSync(workflowPath, "utf8").replace(
-        "git add .pipr/package.json .pipr/bun.lock .github/workflows/pipr.yml",
-        "git add .pipr/package.json .pipr/bun.lock",
+        "run: bun scripts/release.ts dogfood",
+        'run: git push origin "HEAD:main"',
       ),
-    );
-
-    expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
-  });
-
-  it("rejects protected main dogfood SDK pushes", () => {
-    const repository = copyRepositoryFixture();
-    const workflowPath = path.join(repository, ".github/workflows/release.yml");
-    const updateBranchPushRef = ['"HEAD:', "${", "branch", '}"'].join("");
-    write(
-      workflowPath,
-      readFileSync(workflowPath, "utf8").replace(updateBranchPushRef, '"HEAD:main"'),
-    );
-
-    expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
-  });
-
-  it("rejects dogfood PR automation that leaves closed PRs closed", () => {
-    const repository = copyRepositoryFixture();
-    const workflowPath = path.join(repository, ".github/workflows/release.yml");
-    write(
-      workflowPath,
-      readFileSync(workflowPath, "utf8").replace('            gh pr reopen "$branch"\n', ""),
-    );
-
-    expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
-  });
-
-  it("rejects dogfood PR automation that fails already merged PRs", () => {
-    const repository = copyRepositoryFixture();
-    const workflowPath = path.join(repository, ".github/workflows/release.yml");
-    const mergedPrMessage = [
-      '            echo "Dogfood SDK update PR for ',
-      "${",
-      "branch",
-      '} is already merged."',
-    ].join("");
-    write(
-      workflowPath,
-      readFileSync(workflowPath, "utf8").replace(
-        [
-          '          if [[ "$pr_state" == "MERGED" ]]; then',
-          mergedPrMessage,
-          "            exit 0",
-          "          fi",
-          "",
-        ].join("\n"),
-        "",
-      ),
-    );
-
-    expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
-  });
-
-  it("rejects dogfood PR automation that swallows PR lookup failures", () => {
-    const repository = copyRepositoryFixture();
-    const workflowPath = path.join(repository, ".github/workflows/release.yml");
-    write(
-      workflowPath,
-      readFileSync(workflowPath, "utf8").replaceAll(
-        dogfoodPrStateLookup,
-        'pr_state="$(gh pr view "$branch" --json state --jq .state 2>/dev/null || true)"',
-      ),
-    );
-
-    expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
-  });
-
-  it("rejects dogfood PR automation that reuses stale PR state after pushing", () => {
-    const repository = copyRepositoryFixture();
-    const workflowPath = path.join(repository, ".github/workflows/release.yml");
-    const stateLookupLine = `          ${dogfoodPrStateLookup}\n`;
-    const workflow = readFileSync(workflowPath, "utf8");
-    const lastLookup = workflow.lastIndexOf(stateLookupLine);
-    if (lastLookup < 0) {
-      throw new Error("dogfood PR state lookup is required");
-    }
-    write(
-      workflowPath,
-      `${workflow.slice(0, lastLookup)}${workflow.slice(lastLookup + stateLookupLine.length)}`,
     );
 
     expect(runScript("scripts/check-release-metadata.ts", [], repository)).not.toBe(0);
