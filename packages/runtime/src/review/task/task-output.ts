@@ -1,6 +1,7 @@
 import type {
   CheckHandle,
   CommentValue,
+  DroppedReviewFinding,
   PathFilter,
   PiprRunSummary,
   PriorReview,
@@ -11,7 +12,6 @@ import { summarizeDiffContextCoverage } from "../../pi/diff-context-coverage.js"
 import type { ReviewResult } from "../../types.js";
 import type { PiRunStats } from "../agent/review-run.js";
 import { mainCommentTitles } from "../comment-branding.js";
-import { reviewFindingSchema } from "../contract.js";
 import {
   type GeneratedMainCommentEnvelope,
   parseGeneratedMainCommentEnvelope,
@@ -39,6 +39,7 @@ export type OutputState = {
   comment?: CommentContribution;
   commandResponse?: CommandResponseContribution;
   findings: FindingContribution[];
+  droppedFindings: DroppedReviewFinding[];
   findingScopes: WeakMap<readonly ReviewFinding[], PathFilter>;
   providerModels: string[];
   repairAttempted: boolean;
@@ -70,13 +71,23 @@ export type TaskRunResult = {
   error?: unknown;
 };
 
+const metadataBearingReviewFindingSchema = z.looseObject({
+  body: z.string().min(1),
+  path: z.string().min(1),
+  rangeId: z.string().min(1),
+  side: z.enum(["RIGHT", "LEFT"]),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  suggestedFix: z.string().min(1).optional(),
+});
+
 const agentInlineFindingsOutputSchema = z.custom<{
   inlineFindings: readonly ReviewFinding[];
 }>(
   (value) =>
     z
       .looseObject({
-        inlineFindings: z.array(reviewFindingSchema),
+        inlineFindings: z.array(metadataBearingReviewFindingSchema),
       })
       .safeParse(value).success,
 );
@@ -84,6 +95,7 @@ const agentInlineFindingsOutputSchema = z.custom<{
 export function createOutputState(): OutputState {
   return {
     findings: [],
+    droppedFindings: [],
     findingScopes: new WeakMap(),
     providerModels: [],
     repairAttempted: false,
@@ -96,6 +108,7 @@ export function mergeTaskOutputs(results: TaskRunResult[]): OutputState {
     mergeCommentContribution(merged, output.comment);
     mergeCommandResponseContribution(merged, output.commandResponse);
     merged.findings.push(...output.findings);
+    merged.droppedFindings.push(...output.droppedFindings);
     merged.providerModels.push(...output.providerModels);
     merged.repairAttempted ||= output.repairAttempted;
   }
@@ -453,10 +466,34 @@ function collectInlineFindings(
   const arrayScope = state.findingScopes.get(findings);
   state.findings.push(
     ...findings.map((finding) => ({
-      finding,
+      finding: canonicalFindingProjection(finding),
       paths: arrayScope,
     })),
   );
+}
+
+export function recordDroppedFindings(
+  state: OutputState,
+  droppedFindings: readonly DroppedReviewFinding[],
+): void {
+  state.droppedFindings.push(
+    ...droppedFindings.map(({ finding, reason }) => ({
+      finding: canonicalFindingProjection(finding),
+      reason,
+    })),
+  );
+}
+
+function canonicalFindingProjection(finding: ReviewFinding): ReviewFinding {
+  return {
+    body: finding.body,
+    path: finding.path,
+    rangeId: finding.rangeId,
+    side: finding.side,
+    startLine: finding.startLine,
+    endLine: finding.endLine,
+    ...(finding.suggestedFix === undefined ? {} : { suggestedFix: finding.suggestedFix }),
+  };
 }
 
 export function trackResultFindingScope(

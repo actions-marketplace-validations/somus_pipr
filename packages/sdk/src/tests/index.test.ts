@@ -28,8 +28,10 @@ import type {
   PiprResult,
   PiprRunSummary,
   PromptText,
+  ReviewFinding,
   Task,
   TaskContext,
+  ValidatedReviewFindings,
 } from "../index.js";
 import {
   defaultReviewActions,
@@ -157,6 +159,67 @@ describe("Pipr Result", () => {
         publication: { state: "completed", action: "updated" },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("TaskContext", () => {
+  it("retains custom finding metadata through runtime validation", () => {
+    const factory = definePipr((pipr) => {
+      pipr.task({
+        name: "review",
+        run(context) {
+          const findings: (ReviewFinding & { severity: "high" })[] = [
+            {
+              body: "This can fail.",
+              path: "src/example.ts",
+              rangeId: "rng_example",
+              side: "RIGHT",
+              startLine: 1,
+              endLine: 1,
+              severity: "high",
+            },
+          ];
+          const validated = context.review.validateFindings(findings);
+          const validSeverity: "high" | undefined = validated.validFindings[0]?.severity;
+          const droppedSeverity: "high" | undefined =
+            validated.droppedFindings[0]?.finding.severity;
+          void validSeverity;
+          void droppedSeverity;
+
+          const literalFinding = {
+            body: "This can fail.",
+            path: "src/example.ts",
+            rangeId: "stale-range",
+            side: "RIGHT",
+            startLine: 1,
+            endLine: 1,
+            severity: "high",
+          } as const;
+          const canonicalized = context.review.validateFindings([literalFinding]);
+          const canonicalRangeId: string | undefined = canonicalized.validFindings[0]?.rangeId;
+          // @ts-expect-error validation can replace a literal rangeId with its canonical string.
+          const staleRangeId: "stale-range" | undefined = canonicalized.validFindings[0]?.rangeId;
+          void canonicalRangeId;
+          void staleRangeId;
+
+          type CategorizedFinding = ReviewFinding &
+            ({ kind: "security"; severity: "high" } | { kind: "quality"; category: "correctness" });
+          const unionFindings = [] as CategorizedFinding[];
+          const unionValidated = context.review.validateFindings(unionFindings);
+          for (const finding of unionValidated.validFindings) {
+            if (finding.kind === "security") {
+              const severity: "high" = finding.severity;
+              void severity;
+            } else {
+              const category: "correctness" = finding.category;
+              void category;
+            }
+          }
+        },
+      });
+    });
+
+    expect(buildPiprPlan(factory).tasks).toHaveLength(1);
   });
 });
 
@@ -658,6 +721,9 @@ describe("definePipr", () => {
         review: {
           async prior() {
             return { inlineFindings: [] };
+          },
+          validateFindings(findings) {
+            return fakeValidatedFindings(findings);
           },
         },
         secret() {
@@ -1168,6 +1234,9 @@ describe("definePipr", () => {
         review: {
           async prior() {
             return { inlineFindings: [] };
+          },
+          validateFindings(findings) {
+            return fakeValidatedFindings(findings);
           },
         },
         secret() {
@@ -1702,6 +1771,12 @@ function fakeCheck() {
   };
 }
 
+function fakeValidatedFindings<T extends ReviewFinding>(
+  findings: readonly T[],
+): ValidatedReviewFindings<T> {
+  return { validFindings: findings, droppedFindings: [] } as unknown as ValidatedReviewFindings<T>;
+}
+
 function fakeTaskContext(): TaskContext {
   return {
     run: { id: "test-run", trigger: "local" },
@@ -1716,6 +1791,9 @@ function fakeTaskContext(): TaskContext {
     review: {
       async prior() {
         return { inlineFindings: [] };
+      },
+      validateFindings(findings) {
+        return fakeValidatedFindings(findings);
       },
     },
     secret() {
