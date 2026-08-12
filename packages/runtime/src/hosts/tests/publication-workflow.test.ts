@@ -1,16 +1,16 @@
 import { describe, expect, it } from "bun:test";
-import {
-  buildPublicationPlan,
-  type InlinePublicationItem,
-  runtimeVersion,
-  type ThreadAction,
-} from "../../review/comment.js";
+import type {
+  InlinePublicationItem,
+  ReviewProgressLease,
+  ThreadAction,
+} from "../../publication/types.js";
+import { buildPublicationPlan } from "../../review/comment.js";
 import {
   renderInlineFindingMarker,
   renderVerifierResponseMarker,
 } from "../../review/prior-state.js";
-import type { ReviewProgressLease } from "../../review/progress.js";
 import { PublicationError } from "../../review/publication-result.js";
+import { runtimeVersion } from "../../shared/version.js";
 import type { ChangeRequestEventContext } from "../../types.js";
 import {
   createPublicationWorkflow,

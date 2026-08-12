@@ -9,20 +9,15 @@ import type {
 } from "@usepipr/sdk";
 import { z } from "zod";
 import { summarizeDiffContextCoverage } from "../../pi/diff-context-coverage.js";
+import type { PriorReviewState, ReviewStats } from "../../publication/types.js";
 import type { ReviewResult } from "../../types.js";
-import type { PiRunStats } from "../agent/review-run.js";
+import type { PiRunStats } from "../agent/review-run-types.js";
 import { mainCommentTitles } from "../comment-branding.js";
 import {
   type GeneratedMainCommentEnvelope,
   parseGeneratedMainCommentEnvelope,
 } from "../main-comment-envelope.js";
-import type { PriorReviewState } from "../prior-state.js";
-import {
-  maxReviewStatsModels,
-  type ReviewStats,
-  sanitizeReviewStatsModel,
-} from "../review-stats.js";
-
+import { maxReviewStatsModels, sanitizeReviewStatsModel } from "../review-stats.js";
 export type RuntimeCheckConclusion = "success" | "failure" | "neutral";
 
 export type RuntimeTaskCheckResult = {

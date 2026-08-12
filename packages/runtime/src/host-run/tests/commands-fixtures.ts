@@ -6,20 +6,17 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runGit as runGitCommand } from "../../diff/git.js";
 import { createGitHubHostAdapter } from "../../hosts/github/adapter.js";
-import type { GitHubCommandClient } from "../../hosts/github/command.js";
-import type { GitHubPublicationClient } from "../../hosts/github/publication.js";
+import type { GitHubCommandClient, GitHubPublicationClient } from "../../hosts/github/client.js";
 import type {
   CodeHostAdapter,
   CodeHostCapabilities,
   RepositoryPermission,
 } from "../../hosts/types.js";
 import { renderInlineFindingMarker } from "../../review/prior-state.js";
+import type { RuntimeLogSink } from "../../shared/logging.js";
 import type { SecretRedactor } from "../../shared/secret-redaction.js";
 import { writeAggregateReviewablePatchOver16MiB } from "../../tests/helpers/aggregate-reviewable-patch.js";
-import {
-  type RuntimeLogSink,
-  runHostRunCommandWithDependencies as runHostRun,
-} from "../commands.js";
+import { runHostRunCommandWithDependencies as runHostRun } from "../commands-hosted.js";
 
 export type TestHostRunOptions = Omit<Parameters<typeof runHostRun>[0], "hostAdapter"> & {
   hostAdapter?: CodeHostAdapter;
