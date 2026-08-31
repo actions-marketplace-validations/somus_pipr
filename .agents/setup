@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mise_bin="$HOME/.local/bin/mise"
+
+run_step() {
+  local label="$1"
+  shift
+  printf '\n==> %s\n' "$label"
+  time "$@"
+}
+
+install_mise() {
+  if [[ -x "$mise_bin" ]]; then
+    return
+  fi
+
+  local installer
+  installer="$(mktemp)"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    https://mise.run --output "$installer"; then
+    rm -f -- "$installer"
+    return 1
+  fi
+  if ! MISE_INSTALL_PATH="$mise_bin" sh "$installer"; then
+    rm -f -- "$installer"
+    return 1
+  fi
+  rm -f -- "$installer"
+}
+
+persist_mise_activation() {
+  local marker="# Pipr mise environment"
+  if grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    return
+  fi
+
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# Pipr mise environment
+if [[ -x "$HOME/.local/bin/mise" ]]; then
+  eval "$("$HOME/.local/bin/mise" activate bash)"
+fi
+EOF
+}
+
+install_workspace_dependencies() {
+  local cache_dir fingerprint marker
+  local -a inputs=(
+    .agents/setup
+    mise.toml
+    bun.lock
+    package.json
+    apps/*/package.json
+    packages/*/package.json
+  )
+
+  cache_dir="$HOME/.cache/amp/pipr-setup"
+  mkdir -p "$cache_dir"
+  fingerprint="$(sha256sum "${inputs[@]}" | sha256sum | cut -d' ' -f1)"
+  marker="$cache_dir/dependencies-$fingerprint"
+
+  if [[ -f "$marker" && -x node_modules/.bin/turbo ]]; then
+    printf 'Workspace dependencies match the restored snapshot.\n'
+    return
+  fi
+
+  "$mise_bin" exec -- bun install --frozen-lockfile
+  rm -f -- "$cache_dir"/dependencies-*
+  touch "$marker"
+}
+
+cd "$repo_root"
+
+run_step "Install mise" install_mise
+persist_mise_activation
+run_step "Trust repository tool configuration" "$mise_bin" trust --yes "$repo_root/mise.toml"
+run_step "Install pinned repository tools" "$mise_bin" install
+run_step "Install Node used by dependency checks" "$mise_bin" install node@24.18.0
+run_step "Install workspace dependencies" install_workspace_dependencies
+run_step "Install Git hooks" "$mise_bin" exec -- hk install --mise

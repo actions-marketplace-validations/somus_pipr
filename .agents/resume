@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pipr has no required backing services or per-thread authentication to restore.
