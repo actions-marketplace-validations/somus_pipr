@@ -34,6 +34,7 @@ const providerConfigSchema = piProviderProfileSchema;
 const optionalPositiveIntegerSchema = z.number().int().positive().optional();
 
 const diffManifestLimitsConfigSchema = z.strictObject({
+  maxShards: optionalPositiveIntegerSchema,
   fullMaxBytes: optionalPositiveIntegerSchema,
   fullMaxEstimatedTokens: optionalPositiveIntegerSchema,
   condensedMaxBytes: optionalPositiveIntegerSchema,
@@ -70,10 +71,12 @@ const piprConfigSchema = z.strictObject({
     showHeader: z.boolean().default(true),
     showFooter: z.boolean().default(true),
     showStats: z.boolean().default(true),
+    showProgress: z.boolean().default(true),
   }),
   limits: z
     .strictObject({
       timeoutSeconds: z.number().int().positive().max(3600).optional(),
+      maxAgentRuns: optionalPositiveIntegerSchema,
       diffManifest: diffManifestLimitsConfigSchema.optional(),
     })
     .optional(),
@@ -118,6 +121,11 @@ const codeHostCoordinatesSchema = z.discriminatedUnion("provider", [
     project: nonEmptyStringSchema,
     projectId: nonEmptyStringSchema.optional(),
     repositoryId: nonEmptyStringSchema,
+  }),
+  z.strictObject({
+    provider: z.literal("gitea"),
+    owner: nonEmptyStringSchema,
+    repository: nonEmptyStringSchema,
   }),
 ]);
 

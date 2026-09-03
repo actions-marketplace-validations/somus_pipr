@@ -1,6 +1,6 @@
 {
   "name": "@usepipr/cli",
-  "version": "0.4.3",
+  "version": "0.8.0",
   "description": "Command-line interface for Pipr code host review automation",
   "type": "module",
   "license": "MIT",
@@ -27,7 +27,7 @@
     "pipr": "./dist/main.mjs"
   },
   "scripts": {
-    "build": "tsdown src/main.ts --dts --format esm --out-dir dist && bun src/release/copy-skills.ts",
+    "build": "tsdown src/main.ts --dts --format esm --out-dir dist --tsconfig tsconfig.build.json && bun src/release/copy-skills.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test --timeout 30000",
     "lint": "biome lint src",
@@ -37,8 +37,8 @@
   },
   "dependencies": {
     "@actions/core": "3.0.1",
-    "@usepipr/runtime": "0.4.3",
-    "@usepipr/sdk": "0.4.3",
+    "@usepipr/runtime": "0.8.0",
+    "@usepipr/sdk": "0.8.0",
     "commander": "15.0.0"
   }
 }

@@ -2,11 +2,12 @@ import type { OfficialInitRecipe } from "./types.js";
 
 export const securitySastRecipe = {
   id: "security-sast",
+  requiresChecksPermission: true,
   title: "Security SAST",
   description: "Security review with custom severity and category output.",
   sourceTools: ["Semgrep", "Snyk", "GitHub CodeQL/code scanning"],
   configTs: `import { definePipr } from "@usepipr/sdk";
-import type { DiffManifest, ReviewFinding } from "@usepipr/sdk";
+import type { ReviewFinding } from "@usepipr/sdk";
 
 type SecuritySummary = {
   headline: string;
@@ -33,7 +34,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   const securityOutput = pipr.jsonSchema<SecurityReview>({
@@ -121,8 +122,15 @@ export default definePipr((pipr) => {
     async run(ctx) {
       const manifest = await ctx.change.diffManifest({ compressed: true });
       const result = await ctx.pi.run(security, { manifest });
-      const risks = commentableSecurityRisks(result.risks, manifest);
-      const droppedRiskCount = result.risks.length - risks.length;
+      const riskFindings = [...result.risks]
+        .sort(
+          (left, right) =>
+            securitySeverityRank(right.severity) - securitySeverityRank(left.severity),
+        )
+        .map((risk) => ({ ...risk.finding, risk }));
+      const { validFindings, droppedFindings } = ctx.review.validateFindings(riskFindings);
+      const risks = validFindings.map(({ risk, ...finding }) => ({ ...risk, finding }));
+      const droppedRiskCount = droppedFindings.length;
       const inlineFindings: ReviewFinding[] = risks.map((risk) => risk.finding);
       const hasHighOrCriticalRisk = risks.some(isHighOrCriticalRisk);
       if (hasHighOrCriticalRisk) {
@@ -130,29 +138,37 @@ export default definePipr((pipr) => {
       } else {
         ctx.check.pass("No high or critical security risks found.");
       }
+      const sections = [
+        securityGateCallout(risks),
+        "",
+        "## 🧭 Summary",
+        "",
+        \`**\${lineText(result.summary.headline)}**\`,
+        "",
+        result.summary.riskSummary,
+      ];
+      if (result.summary.reviewerFocus.length > 0) {
+        sections.push(
+          "",
+          "## 🎯 Reviewer Focus",
+          "",
+          bulletList(result.summary.reviewerFocus),
+        );
+      }
+      if (risks.length > 0) {
+        sections.push("", "## ⚠️ Security Risks", "", securityRisksTable(risks));
+      }
+      if (droppedRiskCount > 0) {
+        sections.push("", omittedRisksNote(droppedRiskCount));
+      }
+      if (risks.length > 0) {
+        sections.push("", riskRationalesBlock(risks));
+      }
+      if (hasHighOrCriticalRisk && result.diagramMermaid?.trim()) {
+        sections.push("", attackPathDiagramBlock(result.diagramMermaid, hasHighOrCriticalRisk));
+      }
       await ctx.comment({
-        main: [
-          "## Summary",
-          "",
-          \`**\${result.summary.headline}**\`,
-          "",
-          securityStatusTable(risks),
-          "",
-          result.summary.riskSummary,
-          "",
-          "## Reviewer Focus",
-          "",
-          bulletList(result.summary.reviewerFocus, "No special security follow-up."),
-          "",
-          "## Security Risks",
-          "",
-          securityRisksTable(risks),
-          ...(droppedRiskCount > 0 ? ["", omittedRisksNote(droppedRiskCount)] : []),
-          ...(risks.length > 0 ? ["", riskRationalesBlock(risks)] : []),
-          ...(hasHighOrCriticalRisk && result.diagramMermaid?.trim()
-            ? ["", attackPathDiagramBlock(result.diagramMermaid, hasHighOrCriticalRisk)]
-            : []),
-        ].join("\\n"),
+        main: sections.join("\\n"),
         inlineFindings,
       });
     },
@@ -162,66 +178,21 @@ export default definePipr((pipr) => {
   pipr.command({ pattern: "@pipr security", permission: "write", task });
 });
 
-function commentableSecurityRisks(
-  risks: SecurityRisk[],
-  manifest: DiffManifest,
-): SecurityRisk[] {
-  const risksByLocation = new Map<string, SecurityRisk>();
-  for (const risk of risks) {
-    const finding = risk.finding;
-    const validAnchor = manifest.files.some((file) =>
-      file.commentableRanges.some(
-        (range) =>
-          finding.rangeId === range.id &&
-          finding.path === range.path &&
-          finding.side === range.side &&
-          finding.startLine <= finding.endLine &&
-          finding.startLine >= range.startLine &&
-          finding.endLine <= range.endLine,
-      ),
-    );
-    const key = [
-      finding.path,
-      finding.rangeId,
-      finding.side,
-      finding.startLine,
-      finding.endLine,
-      finding.body,
-    ].join("\\n");
-    if (!validAnchor) {
-      continue;
-    }
-    const existing = risksByLocation.get(key);
-    if (!existing || securitySeverityRank(risk.severity) > securitySeverityRank(existing.severity)) {
-      risksByLocation.set(key, risk);
-    }
-  }
-  return [...risksByLocation.values()];
-}
-
 function omittedRisksNote(count: number): string {
   const noun = count === 1 ? "risk" : "risks";
   return \`Omitted \${count} \${noun} with an invalid or duplicate anchor.\`;
 }
 
-function securityStatusTable(risks: SecurityRisk[]): string {
-  return [
-    "| Status | Max severity | Risks |",
-    "| --- | --- | ---: |",
-    \`| \${risks.some(isHighOrCriticalRisk) ? "Fail" : "Pass"} | \${maxSeverity(
-      risks,
-    )} | \${risks.length} |\`,
-  ].join("\\n");
+function securityGateCallout(risks: SecurityRisk[]): string {
+  const blockingRiskCount = risks.filter(isHighOrCriticalRisk).length;
+  if (blockingRiskCount === 0) {
+    return "> ✅ **Security gate passed:** No high or critical risks.";
+  }
+  const noun = blockingRiskCount === 1 ? "risk requires" : "risks require";
+  return \`> ❌ **Security gate failed:** \${blockingRiskCount} high or critical \${noun} attention.\`;
 }
 
 function securityRisksTable(risks: SecurityRisk[]): string {
-  if (risks.length === 0) {
-    return [
-      "| Severity | Category | Title |",
-      "| --- | --- | --- |",
-      "| - | - | No security risks found. |",
-    ].join("\\n");
-  }
   return [
     "| Severity | Category | Title |",
     "| --- | --- | --- |",
@@ -243,12 +214,12 @@ function riskRationalesBlock(risks: SecurityRisk[]): string {
     risks
       .map((risk, index) =>
         [
-          \`### \${index + 1}. \${risk.title}\`,
+          \`### \${index + 1}. \${escapeDetailsHtml(lineText(risk.title))}\`,
           "",
           \`**Severity:** \${labelValue(risk.severity)}\`,
           \`**Category:** \${labelValue(risk.category)}\`,
           "",
-          risk.rationale,
+          escapeDetailsHtml(risk.rationale),
         ].join("\\n"),
       )
       .join("\\n\\n"),
@@ -278,16 +249,6 @@ function attackPathDiagramBlock(
   ].join("\\n");
 }
 
-function maxSeverity(risks: SecurityRisk[]): string {
-  const severity = risks.reduce<SecurityRisk["severity"] | undefined>((current, risk) => {
-    if (!current || securitySeverityRank(risk.severity) > securitySeverityRank(current)) {
-      return risk.severity;
-    }
-    return current;
-  }, undefined);
-  return severity ? labelValue(severity) : "None";
-}
-
 function securitySeverityRank(severity: SecurityRisk["severity"]): number {
   return ["low", "medium", "high", "critical"].indexOf(severity);
 }
@@ -296,10 +257,7 @@ function isHighOrCriticalRisk(risk: SecurityRisk): boolean {
   return risk.severity === "high" || risk.severity === "critical";
 }
 
-function bulletList(items: string[], emptyText: string): string {
-  if (items.length === 0) {
-    return emptyText;
-  }
+function bulletList(items: string[]): string {
   return items.map((item) => \`- \${lineText(item)}\`).join("\\n");
 }
 
@@ -313,6 +271,10 @@ function lineText(value: string): string {
 
 function tableCell(value: string): string {
   return lineText(value).replaceAll("|", "\\\\|");
+}
+
+function escapeDetailsHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 function markdownFenceFor(value: string): string {

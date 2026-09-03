@@ -12,7 +12,7 @@ Pipr owns the provider-neutral change request runtime; Pi owns agent execution. 
 | Runtime | Config loading, task execution, diff handling, Pi execution, review validation, and rendering | `packages/runtime/src/` |
 | Review validation | Review contract, parse/repair, bounded-range validation, and comment publication | `packages/runtime/src/review/contract.ts`, `packages/runtime/src/review/agent/review-run.ts`, `packages/runtime/src/review/range-validation.ts`, `packages/runtime/src/review/review.ts` |
 | CLI and hosted runs | CLI commands, provider-neutral host execution, and GitHub Action packaging | `packages/cli/src/`, `packages/runtime/src/host-run/`, `action.yml`, `Dockerfile` |
-| Change request dispatch | Host-run command selection, change request entry, and native payload parsing | `packages/runtime/src/host-run/commands.ts`, `packages/runtime/src/host-run/change-request-entry.ts`, `packages/runtime/src/hosts/*/event.ts` |
+| Change request dispatch | Host-run command selection, change request entry, and native payload parsing | `packages/runtime/src/host-run/commands-hosted.ts`, `packages/runtime/src/host-run/change-request-entry.ts`, `packages/runtime/src/hosts/*/event.ts` |
 | Action integration tests | Docker image, Pi contract, and `act` fixtures | `packages/e2e/` |
 | Product docs | Fumadocs content | `apps/docs/content/docs/` |
 | Domain and decisions | Product language and durable architecture | `docs/CONTEXT.md`, `docs/adr/` |
@@ -35,7 +35,7 @@ Treat this table as the canonical command map for task planning. Do not reopen r
 
 After Docker packaging changes, also verify the image can run `pi --help` and `pipr host-run --help`.
 
-Local tooling is Bun 1.3.14, `act` 0.2.89, and hk 1.50.0 through mise. Action verification requires Docker. GitHub Action dispatch reads `GITHUB_EVENT_PATH` and `GITHUB_EVENT_NAME`; provider credentials remain external secrets and must not be copied into repository instructions or fixtures.
+Local tooling is Bun 1.4.0, `act` 0.2.89, and hk 1.56.1 through mise. Action verification requires Docker. GitHub Action dispatch reads `GITHUB_EVENT_PATH` and `GITHUB_EVENT_NAME`; provider credentials remain external secrets and must not be copied into repository instructions or fixtures.
 
 ## Source and generated paths
 
@@ -61,7 +61,7 @@ Never commit real local sessions, secrets, credentials, private logs, unredacted
 
 ## Load-bearing review rules
 
-- Diff parsing, Pi execution, and review validation stay in Pipr through `ctx.change.diffManifest()` and `ctx.pi.run()`, not userland blocks.
+- Diff parsing, Pi execution, and review validation stay in Pipr through `ctx.change.diffManifest()`, `ctx.pi.run()`, and `ctx.review.validateFindings()`, not userland blocks.
 - Reviewer output remains schema-first: validate structured JSON, allow one repair attempt, and drop invalid findings with metadata.
 - Inline finding `rangeId`, path, and side must match the selected Diff Manifest range. `startLine` must not exceed `endLine`, and both bounds must stay inside that range; a valid strict subrange is allowed.
 - Range-validation changes must keep direct validator tests, review/task-runtime fixtures, GitHub inline mapping tests, and deterministic prompt-eval expectations aligned.
@@ -71,7 +71,7 @@ Never commit real local sessions, secrets, credentials, private logs, unredacted
 
 - Use TDD for behavior changes: add or port one failing behavior test, implement the minimum, then refactor while green.
 - Add focused coverage when config loading, provider resolution, plan inspection, task execution, diff parsing, schema validation, comment rendering, code host publishing, or dry-run boundaries change.
-- Put executable tests in the nearest `tests/` folder under the source folder they cover: `src/host-run/commands.ts` maps to `src/host-run/tests/commands.test.ts`.
+- Put executable tests in the nearest `tests/` folder under the source folder they cover: `src/host-run/commands-local-review.ts` maps to `src/host-run/tests/commands-local-review.test.ts`.
 - Use `src/tests/` only for package-root files such as `src/index.ts` or `src/types.ts`.
 - Prefer public API tests. Test internals only when they have meaningful independent complexity.
 - Preserve fixture behavior unless the test documents an intentional divergence.

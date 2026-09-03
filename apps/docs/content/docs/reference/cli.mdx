@@ -56,9 +56,13 @@ Options:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--config-dir <dir>` | `.pipr` | Config directory to create. |
-| `--adapters <adapters>` | `github` | Adapter files to initialize. Use `none` to skip workflow files. |
+| `--adapters <adapters>` | `github` | Comma-separated adapter files to initialize: `github`, `gitlab`, `azure-devops`, `bitbucket`, `gitea`, `forgejo`, or `codeberg`. Use `none` to skip workflow files. |
 | `--recipe <recipe>` | none | Starter recipe id. |
 | `--minimal` | false | Scaffold only `.pipr/config.ts` without `package.json` or `tsconfig.json`. |
+| `--runtime-image <image>` | Pipr release image | Container image used by generated adapter setup. |
+| `--checkout-action <ref>` | `actions/checkout@v6` | Checkout action reference used by generated GitHub setup. |
+| `--github-runner <label>` | `ubuntu-latest` | Runner label used by generated GitHub setup. Use an instance-specific Linux runner label to override the GHES default. |
+| `--github-enterprise-server` | false | Generate a GHES-compatible workflow targeting `[self-hosted, linux]` with a supported artifact action. |
 | `--force` | false | Overwrite existing Pipr files. |
 
 Examples:
@@ -66,12 +70,17 @@ Examples:
 ```bash
 pipr init --adapters none
 pipr init --adapters gitlab
+pipr init --adapters forgejo
 pipr init --recipe security-sast
 pipr init --minimal
 pipr init --config-dir .config/pipr
+pipr init \
+  --github-enterprise-server \
+  --checkout-action internal-actions/checkout@v6 \
+  --runtime-image registry.internal.example/pipr:v0.8.0 # x-release-please-version
 ```
 
-See [Init Recipes](/docs/recipes) for recipe ids.
+See [Init Recipes](/docs/recipes) for recipe ids. For disconnected networks, mirror the Pipr image and checkout repository before passing their internal references. The checkout action uses `OWNER/REPOSITORY@REF` on the GitHub instance that runs the workflow, not a cross-host URL.
 
 ## `pipr host-run`
 
@@ -89,7 +98,7 @@ Options:
 | `--event <path>` | `PIPR_EVENT_PATH` or provider event path | Native event payload path when the provider supplies one. |
 | `--config-dir <dir>` | `.pipr` | Config directory to load. |
 
-The command selects a workspace from recognized provider CI variables, then falls back to the current directory. The GitHub Action invokes this command with `--host github` and preserves GitHub Actions logging and outputs. This release includes `github`, `gitlab`, `azure-devops`, and `bitbucket`.
+The command selects a workspace from recognized provider CI variables, then falls back to the current directory. The GitHub Action invokes this command with `--host github` and preserves GitHub Actions logging and outputs. This release includes `github`, `gitlab`, `azure-devops`, `bitbucket`, `gitea`, `forgejo`, and `codeberg`.
 
 ## `pipr webhook serve`
 
@@ -107,17 +116,146 @@ Options:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--host <host>` | required | Webhook provider: `gitlab`, `azure-devops`, or `bitbucket`. |
-| `--repository <repository>` | required | Expected GitLab project path/ID, Azure repository name/ID, or Bitbucket repository slug. Mismatched payloads are rejected. |
+| `--host <host>` | required | Webhook provider: `gitlab`, `azure-devops`, `bitbucket`, `gitea`, `forgejo`, or `codeberg`. |
+| `--repository <repository>` | required | Expected provider repository. Gitea-compatible hosts use `owner/repository`. Mismatched payloads are rejected. |
 | `--workspace <path>` | required | Dedicated trusted repository checkout. |
 | `--database <path>` | `.pipr/webhooks.sqlite` | Durable delivery and deduplication database. |
 | `--hostname <hostname>` | `127.0.0.1` | Listen hostname. Keep loopback when using a reverse proxy. |
 | `--port <port>` | `8787` | Listen port. |
 | `--config-dir <dir>` | `.pipr` | Config directory to load from Trusted Base Config. |
+| `--run-store-dir <path>` | `/var/lib/pipr/runs` | Diagnostic bundle store. |
+| `--run-retention-days <days>` | `14` | Completed bundle retention. |
+| `--run-max-bytes <bytes>` | `5368709120` | Maximum run-store size. |
 
-`PIPR_WEBHOOK_SECRET` is required. Azure workers also require `AZURE_DEVOPS_ORGANIZATION`, `AZURE_DEVOPS_PROJECT`, and `PIPR_AZURE_SUBSCRIPTION_ID`. Bitbucket workers require `BITBUCKET_WORKSPACE`, `BITBUCKET_REPO_SLUG`, `BITBUCKET_EMAIL`, and `BITBUCKET_API_TOKEN`; command permission checks also require the separate workspace-admin permission credential documented in the [Bitbucket Cloud guide](/docs/guide/bitbucket). Provider credentials and model keys remain in the runner environment.
+`PIPR_WEBHOOK_SECRET` is required. Azure workers also require `AZURE_DEVOPS_PROJECT`, `PIPR_AZURE_SUBSCRIPTION_ID`, and either `AZURE_DEVOPS_ORGANIZATION` for Services or `AZURE_DEVOPS_COLLECTION_URL` for Server; Server 2022 uses `AZURE_DEVOPS_API_VERSION=7.0`, while Server 2022.1 and Services use `7.1`. Bitbucket Cloud workers require workspace, repository, email, API-token, and separate workspace-admin permission credentials. Bitbucket Data Center workers require `BITBUCKET_BASE_URL`, `BITBUCKET_PROJECT_KEY`, `BITBUCKET_REPO_SLUG`, `BITBUCKET_TOKEN`, `BITBUCKET_USER`, and the separate system-admin `BITBUCKET_PERMISSION_TOKEN` documented in the [Bitbucket guide](/docs/guide/bitbucket). Gitea uses `GITEA_SERVER_URL` and `GITEA_TOKEN`; Forgejo uses `FORGEJO_SERVER_URL` and `FORGEJO_TOKEN`; Codeberg uses `CODEBERG_TOKEN`. Provider credentials and model keys remain in the runner environment.
 
 `GET /healthz` returns `200 OK` while the HTTP server can accept deliveries. It does not inspect provider credentials or run model work. See [Deploy the webhook runner with Docker](/docs/guide/webhook-docker) for the supported Compose deployment.
+
+## `pipr webhook status`
+
+Inspect recent results from a webhook worker's local SQLite queue:
+
+```bash
+pipr webhook status --database /var/lib/pipr/webhooks.sqlite
+pipr webhook status --database /var/lib/pipr/webhooks.sqlite --limit 50 --json
+```
+
+The default table shows a bounded delivery ID, host, queue status, attempts, result kind, shortened Review Run ID, and update time. `--json` returns full delivery IDs and parsed safe Pipr Result V2 values in a versioned envelope. Results omitted by the 512 KiB per-result or 32 MiB aggregate retention limits report `size-limit` or `retention`; corrupted JSON reports `invalid` without hiding other deliveries.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--database <path>` | `.pipr/webhooks.sqlite` | Existing delivery database. Pipr fails without creating it when the path is missing. |
+| `--limit <count>` | `20` | Number of deliveries to return, from 1 to 200. |
+| `--json` | false | Print a versioned JSON envelope instead of the table. |
+
+## `pipr runs list`
+
+List local records for one pull or merge request and merge GitHub Actions records when the selector is a GitHub pull request:
+
+```bash
+pipr runs list --pr 42
+pipr runs list --pr "$GITHUB_CHANGE_REQUEST_URL" --json
+pipr runs list --host forgejo --pr "$FORGEJO_CHANGE_REQUEST_URL"
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--pr <selector>` | required | Change request number or provider URL. |
+| `--host <host>` | Git remote or URL | Override the provider. |
+| `--repository <repository>` | Git remote or URL | Override the provider repository path. |
+| `--kind <kind>` | `all` | Filter `review`, `command`, `verifier`, or `startup`. |
+| `--status <status>` | all | Filter by run outcome or artifact state. |
+| `--limit <count>` | `20` | Return 1 to 1,000 records. |
+| `--json` | false | Print a versioned JSON envelope, including partial-source errors. |
+| `--store <path>` | `PIPR_RUN_STORE_DIR`, otherwise `.pipr-runs` and platform state | Select the local store merged with GitHub Actions records for GitHub selectors. |
+
+A numeric selector derives the host and repository from `remote.origin.url`. A provider URL works outside a checkout, but self-hosted Gitea and Forgejo URLs and Bitbucket Data Center URLs on private domains require an explicit `--host` because their domains don't identify the provider. For example:
+
+```bash
+pipr runs list \
+  --host bitbucket \
+  --pr "$BITBUCKET_CHANGE_REQUEST_URL"
+```
+
+Explicit `--host` and `--repository` values override discovery. Non-GitHub selectors filter local stores only; Pipr does not call their remote APIs.
+
+## `pipr runs show`
+
+Diagnose one execution or the latest completed review for a change request:
+
+```bash
+pipr runs show 0123456789abcdef0123456789abcdef
+pipr runs show --pr 42 --timeline
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `[execution-id]` | none | Select one 32-character execution trace ID. |
+| `--pr <selector>` | none | Select the latest completed review for the change request. |
+| `--host <host>` | Git remote or URL | Override the provider. |
+| `--repository <repository>` | Git remote or URL | Override the provider repository path. |
+| `--kind <kind>` | `review` with `--pr` | Select `command`, `verifier`, `startup`, or `all`. |
+| `--timeline` | false | Print the complete span timeline. |
+| `--identity <path>` | `PIPR_RUN_AGE_IDENTITY`, then the platform default | Decrypt age-protected diagnostics. Repeat for multiple identities. |
+| `--json` | false | Print the manifest, spans, diagnosis, and artifact descriptors without prompt or output bodies. |
+| `--store <path>` | `PIPR_RUN_STORE_DIR`, otherwise `.pipr-runs` and platform state | Select the local store merged with GitHub Actions records for GitHub selectors. |
+
+The diagnosis is deterministic and does not invoke an LLM. Without a matching identity, an age-protected run returns the public metadata diagnosis with `diagnostic: "locked"`.
+
+## `pipr runs inspect`
+
+Validate and diagnose a Run Bundle that was downloaded manually:
+
+```bash
+pipr runs inspect ./pipr-run-artifact.tar.gz
+pipr runs inspect ./pipr-run-artifact --identity ./run-observability.agekey --timeline
+```
+
+The input can be a protected package directory or a validated plaintext bundle directory. It can also be a ZIP or tar.gz archive containing exactly one of those directories. This supports custom artifact storage on hosts without first-class remote retrieval.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `<path>` | required | Select the downloaded archive or extracted directory. |
+| `--timeline` | false | Print the complete span timeline. |
+| `--identity <path>` | `PIPR_RUN_AGE_IDENTITY`, then the platform default | Decrypt age-protected diagnostics. Repeat for multiple identities. |
+| `--json` | false | Print the manifest, spans, diagnosis, and artifact descriptors without prompt or output bodies. |
+
+Without a matching identity, `inspect` returns the content-free metadata diagnosis and reports the diagnostic archive as locked. Pipr validates schemas, hashes, paths, symlinks, file sets, and expansion limits before rendering either plane.
+
+## `pipr runs download`
+
+Download and validate one bundle:
+
+```bash
+pipr runs download 0123456789abcdef0123456789abcdef --output ./pipr-run
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `<execution-id>` | required | Select one 32-character execution trace ID. |
+| `--host <host>` | Git remote | Override the code host when downloading outside a checkout. |
+| `--repository <repository>` | Git remote | Override the provider repository path. |
+| `--output <path>` | `pipr-run-<execution-id>` | Write the validated unpacked directory. The destination must not exist. |
+| `--archive` | false | Preserve the original GitHub Actions archive beside the directory. |
+| `--identity <path>` | `PIPR_RUN_AGE_IDENTITY`, then the platform default | Required for an age-protected diagnostic. Repeat for multiple identities. |
+| `--store <path>` | `PIPR_RUN_STORE_DIR`, otherwise `.pipr-runs` and platform state | Select the local store merged with GitHub Actions records for GitHub selectors. |
+
+See [Debug captured runs](/docs/guide/run-observability) for GitHub credentials, capture settings, artifact states, and bundle security.
+
+## `pipr runs keygen`
+
+Generate a standard X25519 age identity for encrypted diagnostic bundles:
+
+```bash
+pipr runs keygen
+pipr runs keygen --output ./pipr-observability.agekey
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--output <path>` | Pipr platform state key directory | Write the identity atomically with mode `0600`. Existing and symlinked targets are rejected. |
+
+The command prints only the identity path and public recipient. Configure the recipient in GitHub Actions through `PIPR_RUN_AGE_RECIPIENTS`; never place the secret identity in repository configuration.
 
 ## `pipr check`
 
@@ -168,7 +306,7 @@ Options:
 | --- | --- | --- |
 | `--config-dir <dir>` | `.pipr` | Config directory to load. |
 
-The output includes models, agents, tasks, commands, tools, publication settings, checks, and limits.
+The output includes models, agents, tasks, change request events, commands, tools, schemas, publication settings, configured limits, the normalized aggregate-check policy, and normalized check behavior for every task. Secret values are never included.
 
 ## `pipr skill`
 
@@ -204,6 +342,8 @@ Options:
 | `--head <sha>` | working tree | Head commit, branch, or ref. Omit to include staged and unstaged tracked-file edits. |
 | `--config-dir <dir>` | `.pipr` | Config directory to load. |
 | `--pi-executable <path>` | `pi` on PATH | Pi executable for local runs. |
+| `--trace [path]` | disabled | Capture a diagnostic bundle. A bare flag uses the platform Pipr state directory. |
+| `--pi-agent-dir <path>` | `PI_CODING_AGENT_DIR` or `$HOME/.pi/agent` | Pi agent directory for models without `apiKey`. |
 | `--json` | false | Print structured local review output. |
 
 See [Local runs](/docs/guide/local-runs) for behavior differences between local and hosted change-request runs.

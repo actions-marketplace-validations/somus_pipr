@@ -36,7 +36,9 @@ if (scenarioArg && selectedScenarios.length === 0) {
 
 assertDockerImageExists(actionImage);
 await checkPiContract({ cwd: sourceRoot, image: actionImage });
+assertAstGrepContract(actionImage);
 assertWebhookEntrypoint(actionImage);
+assertRunStoreWritable(actionImage);
 await assertWebhookHealth(actionImage);
 
 for (const scenario of selectedScenarios) {
@@ -207,6 +209,42 @@ function assertDockerImageExists(image: string): void {
   }
 }
 
+function assertAstGrepContract(image: string): void {
+  const version = runOutput(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--entrypoint",
+      "/usr/local/bin/ast-grep",
+      image,
+      "--version",
+    ],
+    sourceRoot,
+  );
+  if (version.stdout.trim() !== "ast-grep 0.45.0") {
+    throw new Error(`container ast-grep version mismatch: '${version.stdout.trim()}'`);
+  }
+  runOutput(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--entrypoint",
+      "/usr/local/bin/ast-grep",
+      image,
+      "outline",
+      "--help",
+    ],
+    sourceRoot,
+  );
+  console.log("container ast-grep contract ok");
+}
+
 function assertWebhookEntrypoint(image: string): void {
   const output = runOutput(
     "docker",
@@ -217,6 +255,25 @@ function assertWebhookEntrypoint(image: string): void {
   assertContains(output.stdout, "--database <path>");
   assertContains(output.stdout, "--hostname <hostname>");
   console.log("container webhook entrypoint ok");
+}
+
+function assertRunStoreWritable(image: string): void {
+  run(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--entrypoint",
+      "/bin/sh",
+      image,
+      "-c",
+      "test -d /var/lib/pipr/runs && test -w /var/lib/pipr/runs",
+    ],
+    sourceRoot,
+  );
+  console.log("container run store writable ok");
 }
 
 async function assertWebhookHealth(image: string): Promise<void> {

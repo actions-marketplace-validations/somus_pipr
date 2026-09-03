@@ -1,54 +1,18 @@
 import { Buffer } from "node:buffer";
 import type { ReviewFinding } from "@usepipr/sdk";
 import { defaultMaxStoredFindings } from "@usepipr/sdk/internal";
-import { z } from "zod";
 import { firstNonEmptyLine } from "../commands/grammar.js";
-import { reviewSideSchema } from "../types.js";
-import { accumulateReviewStats, type ReviewStats, reviewStatsSchema } from "./review-stats.js";
+import { findingIdSchema, priorReviewStateSchema } from "../publication/schemas.js";
+import type { PriorFindingRecord, PriorReviewState, ReviewStats } from "../publication/types.js";
+import { accumulateReviewStats } from "./review-stats.js";
+
+export { findingIdSchema, priorReviewStateSchema };
 
 export const mainCommentMarker = "pipr:main-comment";
 const inlineFindingMarkerPrefix = "pipr:finding";
 const resolvedFindingMarkerPrefix = "pipr:resolved";
 const verifierResponseMarkerPrefix = "pipr:verifier-response";
 
-export const findingIdSchema = z
-  .string()
-  .min(1)
-  .regex(/^[A-Za-z0-9_.-]+$/);
-
-const priorFindingStatusSchema = z.enum(["open", "resolved"]);
-
-const priorFindingRecordSchema = z.strictObject({
-  id: findingIdSchema,
-  anchorFingerprint: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
-  issueFingerprint: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
-  status: priorFindingStatusSchema,
-  path: z.string().min(1),
-  rangeId: z.string().min(1),
-  side: reviewSideSchema,
-  startLine: z.number().int().positive(),
-  endLine: z.number().int().positive(),
-  firstSeenHeadSha: z.string().min(1),
-  lastSeenHeadSha: z.string().min(1),
-  lastCommentedHeadSha: z.string().min(1).optional(),
-});
-
-export const priorReviewStateSchema = z.strictObject({
-  version: z.literal(1),
-  reviewedHeadSha: z.string().min(1),
-  selectedTasks: z.array(z.string().min(1)),
-  findings: z.array(priorFindingRecordSchema),
-  stats: reviewStatsSchema.optional(),
-});
-
-export type PriorFindingRecord = z.infer<typeof priorFindingRecordSchema>;
-export type PriorReviewState = z.infer<typeof priorReviewStateSchema>;
 export type FindingMarkerRecord = {
   id: string;
   head: string;
@@ -80,6 +44,7 @@ export function buildPriorReviewState(options: {
   reviewedHeadSha: string;
   selectedTasks: string[];
   stats?: ReviewStats;
+  workflowUrl?: string;
 }): PriorReviewState {
   const scopedPriorState = priorReviewStateForSelectedTasks(
     options.priorState,
@@ -91,6 +56,12 @@ export function buildPriorReviewState(options: {
   const nextFindings = new Map<string, PriorFindingRecord>();
   const usedPriorIds = new Set<string>();
   const stats = accumulateReviewStats(scopedPriorState?.stats, options.stats);
+  const workflowUrls = [
+    ...new Set([
+      ...(scopedPriorState?.workflowUrls ?? []),
+      ...(options.workflowUrl ? [options.workflowUrl] : []),
+    ]),
+  ];
   const findings = options.findings.map((item) => item.finding);
   const fingerprintCounts = countFindingFingerprints(options.findings);
 
@@ -116,6 +87,7 @@ export function buildPriorReviewState(options: {
     selectedTasks: options.selectedTasks,
     findings: [...nextFindings.values()],
     ...(stats ? { stats } : {}),
+    ...(workflowUrls.length > 0 ? { workflowUrls } : {}),
   };
 }
 

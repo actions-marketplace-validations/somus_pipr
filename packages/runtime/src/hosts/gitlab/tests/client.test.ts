@@ -2,6 +2,52 @@ import { describe, expect, it } from "bun:test";
 import { createGitLabClient } from "../client.js";
 
 describe("GitLab API client", () => {
+  it("keeps the predefined CI API URL ahead of an explicit override", async () => {
+    const client = createGitLabClient(
+      {
+        GITLAB_TOKEN: "test-token",
+        GITLAB_API_URL: "https://gitlab.example.com/api/v4/",
+        CI_API_V4_URL: "https://trusted-gitlab.example.com/api/v4",
+      },
+      async (input) => {
+        expect(String(input)).toBe(
+          "https://trusted-gitlab.example.com/api/v4/projects/group%2Fproject",
+        );
+        return Response.json({ id: 42, path_with_namespace: "group/project" });
+      },
+    );
+
+    await client.getProject("group/project");
+  });
+
+  it("uses the explicit API URL for a self-managed webhook runner outside CI", async () => {
+    const client = createGitLabClient(
+      { GITLAB_TOKEN: "test-token", GITLAB_API_URL: "https://gitlab.example.com/api/v4/" },
+      async (input) => {
+        expect(String(input)).toBe("https://gitlab.example.com/api/v4/projects/group%2Fproject");
+        return Response.json({ id: 42, path_with_namespace: "group/project" });
+      },
+    );
+
+    await client.getProject("group/project");
+  });
+
+  it("uses the predefined API URL when the explicit template value is empty", async () => {
+    const client = createGitLabClient(
+      {
+        GITLAB_TOKEN: "test-token",
+        GITLAB_API_URL: "",
+        CI_API_V4_URL: "https://gitlab.example.com/api/v4",
+      },
+      async (input) => {
+        expect(String(input)).toBe("https://gitlab.example.com/api/v4/projects/group%2Fproject");
+        return Response.json({ id: 42, path_with_namespace: "group/project" });
+      },
+    );
+
+    await client.getProject("group/project");
+  });
+
   it("resolves canonical project coordinates", async () => {
     const client = createGitLabClient({ GITLAB_TOKEN: "test-token" }, async (input) => {
       expect(String(input)).toContain("projects/group%2Fproject");
@@ -256,6 +302,33 @@ describe("GitLab API client", () => {
       start: { old_line: null, new_line: 1 },
       end: { old_line: null, new_line: 2 },
     });
+  });
+
+  it("accepts a null line range on an existing discussion position", async () => {
+    const client = createGitLabClient({ GITLAB_TOKEN: "test-token" }, async () =>
+      Response.json([
+        {
+          id: "thread-1",
+          notes: [
+            {
+              id: 10,
+              body: "inline",
+              position: {
+                old_path: "src/a.ts",
+                new_path: "src/a.ts",
+                old_line: null,
+                new_line: 2,
+                line_range: null,
+              },
+            },
+          ],
+        },
+      ]),
+    );
+
+    const discussions = await client.listDiscussions("group/project", 7);
+
+    expect(discussions[0]?.notes[0]?.position?.line_range).toBeUndefined();
   });
 });
 

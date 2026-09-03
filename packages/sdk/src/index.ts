@@ -2,16 +2,52 @@ import { z } from "zod";
 
 export { definePipr, definePlugin } from "./builder.js";
 export { md } from "./prompt.js";
-export type { ReviewFinding, ReviewResult, ReviewSummary } from "./review-contract.js";
+export type {
+  PiprDiffContextCoverage,
+  PiprResult,
+  PiprRunContext,
+  PiprRunSummary,
+  PiprRunTrigger,
+} from "./result.js";
+export { parsePiprResult, piprResultSchema } from "./result.js";
+export type {
+  ReviewFinding,
+  ReviewFindingsResult,
+  ReviewResult,
+  ReviewSummary,
+} from "./review-contract.js";
 export {
   parseReviewFinding,
+  parseReviewFindingsResult,
   parseReviewResult,
   parseReviewSummary,
   reviewFindingSchema,
+  reviewFindingsResultSchema,
   reviewResultSchema,
   reviewSchemaExample,
   reviewSummarySchema,
 } from "./review-contract.js";
+export type {
+  RunBundle,
+  RunBundleArtifact,
+  RunBundleEnvelope,
+  RunBundleManifest,
+  RunLogRecord,
+  RunMetricsSnapshot,
+  RunSpanRecord,
+} from "./run-bundle.js";
+export {
+  parseRunBundle,
+  parseRunBundleEnvelope,
+  parseRunBundleManifest,
+  runBundleArtifactSchema,
+  runBundleEnvelopeSchema,
+  runBundleManifestSchema,
+  runBundleSchema,
+  runLogRecordSchema,
+  runMetricsSnapshotSchema,
+  runSpanRecordSchema,
+} from "./run-bundle.js";
 export { jsonSchema, schema, schemas } from "./schema.js";
 export type {
   Agent,
@@ -32,12 +68,14 @@ export type {
   DurationInput,
   ModelOptions,
   ModelProfile,
+  ModelThinkingLevel,
   PiprConfigOptions,
   PublicationOptions,
   RepositoryPermission,
   SecretOptions,
   SecretRef,
 } from "./types/config.js";
+export { modelThinkingLevels } from "./types/config.js";
 export type {
   ChangedFile,
   CommentableRange,
@@ -80,6 +118,9 @@ export type {
   CommandRegistrationOptions,
   CommentValue,
   DefaultReviewInput,
+  DefaultReviewSummaryInput,
+  DefaultReviewSummaryManifest,
+  DroppedReviewFinding,
   PiprBuilder,
   PiprPlugin,
   PiRunner,
@@ -90,8 +131,7 @@ export type {
   RepositoryInfo,
   ReviewCommentContext,
   ReviewEntrypoints,
-  Reviewer,
-  ReviewerOptions,
+  ReviewInstructions,
   ReviewRecipeOptions,
   Task,
   TaskCheckOptions,
@@ -99,7 +139,12 @@ export type {
   TaskDefinition,
   TaskHandler,
   ToolRunOptions,
+  ValidatedReviewFindings,
+  ValidateFindingsOptions,
 } from "./types/task.js";
-export { defaultReviewActions, defaultReviewEntrypoints } from "./types/task.js";
+export {
+  defaultReviewActions,
+  defaultReviewEntrypoints,
+} from "./types/task.js";
 
 export { z };

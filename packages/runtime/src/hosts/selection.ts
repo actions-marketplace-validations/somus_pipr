@@ -1,4 +1,14 @@
-const codeHostIds = ["github", "gitlab", "azure-devops", "bitbucket"] as const;
+import { match } from "ts-pattern";
+
+const codeHostIds = [
+  "github",
+  "gitlab",
+  "azure-devops",
+  "bitbucket",
+  "gitea",
+  "forgejo",
+  "codeberg",
+] as const;
 
 export type CodeHostId = (typeof codeHostIds)[number];
 
@@ -11,7 +21,10 @@ export function resolveCodeHostId(options: {
     return parseCodeHostId(selected);
   }
   const detected: CodeHostId[] = [];
-  if (options.env.GITHUB_ACTIONS !== undefined) {
+  const giteaFamily = detectedGiteaFamilyHost(options.env);
+  if (giteaFamily) {
+    detected.push(giteaFamily);
+  } else if (options.env.GITHUB_ACTIONS !== undefined) {
     detected.push("github");
   }
   if (options.env.GITLAB_CI !== undefined) {
@@ -36,15 +49,39 @@ export function resolveCodeHostId(options: {
 }
 
 function parseCodeHostId(value: string): CodeHostId {
-  switch (value) {
-    case "github":
-    case "gitlab":
-    case "azure-devops":
-    case "bitbucket":
-      return value;
-    default:
+  return match(value)
+    .with(
+      "github",
+      "gitlab",
+      "azure-devops",
+      "bitbucket",
+      "gitea",
+      "forgejo",
+      "codeberg",
+      (host) => host,
+    )
+    .otherwise((unsupported) => {
       throw new Error(
-        `Unsupported code host '${value}'. Supported hosts: ${codeHostIds.join(", ")}`,
+        `Unsupported code host '${unsupported}'. Supported hosts: ${codeHostIds.join(", ")}`,
       );
+    });
+}
+
+function detectedGiteaFamilyHost(env: NodeJS.ProcessEnv): CodeHostId | undefined {
+  if (env.FORGEJO_ACTIONS !== undefined) {
+    return isCodebergServer(env.FORGEJO_SERVER_URL) ? "codeberg" : "forgejo";
+  }
+  if (env.GITEA_ACTIONS !== undefined) {
+    return "gitea";
+  }
+  return undefined;
+}
+
+function isCodebergServer(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    return new URL(value).hostname === "codeberg.org";
+  } catch {
+    return false;
   }
 }

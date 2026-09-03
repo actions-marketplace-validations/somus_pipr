@@ -1,5 +1,13 @@
 import { z } from "zod";
 import { createDiffRangeIndex } from "../diff/ranges.js";
+import type {
+  InlinePublicationItem,
+  PriorReviewState,
+  PublicationMetadata,
+  PublicationPlan,
+  ReviewStats,
+  ThreadAction,
+} from "../publication/types.js";
 import { compareStableSemver, stableSemverPattern } from "../shared/semver.js";
 import type {
   ChangeRequestEventContext,
@@ -13,6 +21,8 @@ import {
   mainCommentHeaderHiddenMarker,
   mainCommentTitle,
   piprRepositoryUrl,
+  reviewResultEndMarker,
+  reviewResultStartMarker,
   reviewStatsEndMarker,
   reviewStatsHiddenMarker,
   reviewStatsStartMarker,
@@ -27,15 +37,12 @@ import {
   mainCommentMarker,
   matchFindingRecord,
   matchResolvedFindingRecord,
-  type PriorReviewState,
   priorReviewStateSchema,
   renderInlineFindingMarker,
   renderMainCommentMarker,
 } from "./prior-state.js";
-import { type ReviewStats, reviewStatsSchema } from "./review-stats.js";
+import { reviewStatsSchema } from "./review-stats.js";
 import { isPublishableSuggestedFixSelection } from "./suggested-fix-publication-policy.js";
-
-export { runtimeVersion } from "../shared/version.js";
 
 const inlinePublicationItemSchema = z
   .strictObject({
@@ -76,7 +83,6 @@ const inlinePublicationItemSchema = z
 
 const inlinePublicationItemsSchema = z.array(inlinePublicationItemSchema);
 
-export type InlinePublicationItem = z.infer<typeof inlinePublicationItemSchema>;
 export type InlineCommentDraft = InlinePublicationItem;
 export type PublishableInlineFinding = {
   finding: ReviewFinding;
@@ -98,8 +104,6 @@ const threadActionSchema = z.strictObject({
 
 const threadActionsSchema = z.array(threadActionSchema);
 
-export type ThreadAction = z.infer<typeof threadActionSchema>;
-
 const publicationMetadataSchema = z.strictObject({
   runtimeVersion: z.string().min(1),
   configVersion: z.string().min(1).optional(),
@@ -113,9 +117,8 @@ const publicationMetadataSchema = z.strictObject({
   droppedFindings: z.number().int().min(0),
   cappedInlineFindings: z.number().int().min(0),
   stats: reviewStatsSchema.optional(),
+  workflowUrl: z.string().url().max(2_048).optional(),
 });
-
-export type PublicationMetadata = z.infer<typeof publicationMetadataSchema>;
 
 const publicationPlanSchema = z.strictObject({
   mainComment: z.string().min(1),
@@ -126,8 +129,6 @@ const publicationPlanSchema = z.strictObject({
   reviewState: priorReviewStateSchema,
   threadActions: threadActionsSchema,
 });
-
-export type PublicationPlan = z.infer<typeof publicationPlanSchema>;
 
 export function publicationPlanForHostCapabilities(
   plan: PublicationPlan,
@@ -368,14 +369,21 @@ function renderMainComment(options: {
     "",
     ...(!options.showHeader ? [mainCommentHeaderHiddenMarker, ""] : []),
     ...(options.showHeader ? [mainCommentTitle, ""] : []),
-    ...(options.metadata.validFindings > 0
-      ? [`**Findings:** ${options.metadata.validFindings}`, ""]
-      : []),
+    reviewResultStartMarker,
+    renderReviewResult(options.metadata.validFindings),
+    reviewResultEndMarker,
+    "",
     options.main,
     "",
     ...(!options.showStats || !options.metadata.stats ? [reviewStatsHiddenMarker, ""] : []),
     ...(options.showStats && options.metadata.stats
-      ? [renderReviewStats(options.metadata.stats), ""]
+      ? [
+          renderReviewStats(
+            options.metadata.stats,
+            reviewWorkflowUrls(options.reviewState, options.metadata.workflowUrl),
+          ),
+          "",
+        ]
       : []),
     ...(options.showFooter
       ? [renderMainCommentAttribution(options.metadata), ""]
@@ -383,26 +391,103 @@ function renderMainComment(options: {
   ].join("\n");
 }
 
-function renderReviewStats(stats: ReviewStats): string {
-  const usageSuffix = stats.usageStatus === "partial" ? " (reported)" : "";
-  const usageUnavailable = stats.usageStatus === "unavailable";
+function reviewWorkflowUrls(
+  reviewState: PriorReviewState,
+  currentWorkflowUrl: string | undefined,
+): string[] | undefined {
+  if (reviewState.workflowUrls) {
+    return reviewState.workflowUrls;
+  }
+  return currentWorkflowUrl ? [currentWorkflowUrl] : undefined;
+}
+
+function renderReviewResult(validFindings: number): string {
+  if (validFindings === 0) {
+    return "> ✅ **No actionable findings:** The review completed without actionable findings.";
+  }
+  const findingLabel = validFindings === 1 ? "finding was" : "findings were";
+  return `> ⚠️ **Needs attention:** ${validFindings} actionable ${findingLabel} identified.`;
+}
+
+function renderReviewStats(stats: ReviewStats, workflowUrls?: string[]): string {
+  const workflowRunCount = workflowUrls?.length ?? 0;
+  const summary =
+    workflowRunCount > 1
+      ? `${workflowRunCount} workflow runs completed: ${formatReviewDuration(stats.durationMs)} combined`
+      : `Review completed in ${formatReviewDuration(stats.durationMs)}`;
   return [
     reviewStatsStartMarker,
     "<details>",
-    "<summary>Review stats</summary>",
+    `<summary>📊 ${summary}</summary>`,
     "",
-    "| Metric | Total |",
-    "| --- | ---: |",
-    `| Models | ${stats.models.map(formatModel).join(", ")} |`,
-    `| Agent runs | ${stats.agentRuns} |`,
-    `| Elapsed | ${formatDuration(stats.durationMs)} |`,
-    `| Input tokens | ${usageUnavailable ? "Unavailable" : `${formatInteger(stats.inputTokens)}${usageSuffix}`} |`,
-    `| Output tokens | ${usageUnavailable ? "Unavailable" : `${formatInteger(stats.outputTokens)}${usageSuffix}`} |`,
-    `| Cost (USD) | ${usageUnavailable ? "Unavailable" : `${formatCost(stats.costUsd)}${usageSuffix}`} |`,
+    ...renderReviewStatsTable(stats, workflowUrls),
     "",
     "</details>",
     reviewStatsEndMarker,
   ].join("\n");
+}
+
+export function renderReviewStatsTable(stats: ReviewStats, workflowUrls?: string[]): string[] {
+  const durationLabel = workflowUrls && workflowUrls.length > 1 ? "Combined runtime" : "Elapsed";
+  return [
+    "| Metric | Total |",
+    "| --- | ---: |",
+    `| Models | ${stats.models.map(formatModel).join(", ")} |`,
+    `| Agent runs | ${stats.agentRuns} |`,
+    `| ${durationLabel} | ${formatReviewDuration(stats.durationMs)} |`,
+    ...renderTokenUsageRows(stats),
+    ...renderCacheUsageRows(stats),
+    ...renderDiffContextCoverageRows(stats),
+    renderCostUsageRow(stats),
+    ...renderWorkflowRows(workflowUrls),
+  ];
+}
+
+function renderTokenUsageRows(stats: ReviewStats): string[] {
+  const suffix = stats.usageStatus === "partial" ? " (reported)" : "";
+  const input = formattedUsageValue(stats.inputTokens, stats.usageStatus, suffix);
+  const output = formattedUsageValue(stats.outputTokens, stats.usageStatus, suffix);
+  return [`| Input tokens | ${input} |`, `| Output tokens | ${output} |`];
+}
+
+function renderCacheUsageRows(stats: ReviewStats): string[] {
+  if (!stats.cacheUsageStatus) return [];
+  const suffix = stats.cacheUsageStatus === "partial" ? " (reported)" : "";
+  return [
+    `| Cache read tokens | ${formattedUsageValue(stats.cacheReadTokens ?? 0, stats.cacheUsageStatus, suffix)} |`,
+    `| Cache write tokens | ${formattedUsageValue(stats.cacheWriteTokens ?? 0, stats.cacheUsageStatus, suffix)} |`,
+  ];
+}
+
+function formattedUsageValue(
+  value: number,
+  status: "complete" | "partial" | "unavailable",
+  suffix: string,
+): string {
+  return status === "unavailable" ? "Unavailable" : `${formatInteger(value)}${suffix}`;
+}
+
+function renderDiffContextCoverageRows(stats: ReviewStats): string[] {
+  const coverage = stats.diffContextCoverage;
+  if (!coverage) return [];
+  return [
+    `| Current-run files with full context | ${formatInteger(coverage.files.covered)} / ${formatInteger(coverage.files.total)} |`,
+    `| Current-run ranges with full context | ${formatInteger(coverage.ranges.covered)} / ${formatInteger(coverage.ranges.total)} |`,
+  ];
+}
+
+function renderCostUsageRow(stats: ReviewStats): string {
+  if (stats.usageStatus === "unavailable") return "| Cost (USD) | Unavailable |";
+  const suffix = stats.usageStatus === "partial" ? " (reported)" : "";
+  return `| Cost (USD) | ${formatCost(stats.costUsd)}${suffix} |`;
+}
+
+function renderWorkflowRows(workflowUrls: string[] | undefined): string[] {
+  if (!workflowUrls?.length) return [];
+  const links = workflowUrls
+    .map((workflowUrl, index) => `[Run ${index + 1}](<${workflowUrl}>)`)
+    .join(", ");
+  return [`| Workflow runs | ${links} |`];
 }
 
 function formatModel(model: string): string {
@@ -418,7 +503,7 @@ function formatInteger(value: number): string {
   return value.toLocaleString("en-US");
 }
 
-function formatDuration(durationMs: number): string {
+export function formatReviewDuration(durationMs: number): string {
   if (durationMs < 1_000) {
     return `${durationMs}ms`;
   }

@@ -2,6 +2,7 @@ import type { OfficialInitRecipe } from "./types.js";
 
 export const prHygieneRecipe = {
   id: "pr-hygiene",
+  requiresChecksPermission: true,
   title: "PR Hygiene",
   description: "Change request hygiene checks for tests, docs, lockfiles, and size.",
   sourceTools: ["Danger JS"],
@@ -13,7 +14,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "medium" },
+    thinking: "medium",
   });
 
   pipr.config({ publication: { maxInlineComments: 5 } });
@@ -92,7 +93,7 @@ export default definePipr((pipr) => {
       ctx.log.info(\`Checking PR hygiene for \${changedFiles.length} changed file(s).\`);
       const manifest = await ctx.change.diffManifest({ compressed: true, maxPreviewLines: 80 });
       const result = await ctx.pi.run(hygiene, { manifest, changedFiles });
-      const inlineFindings: ReviewFinding[] = result.findings.map((finding) => {
+      const mappedFindings: ReviewFinding[] = result.findings.map((finding) => {
         const policy = finding.policy
           .replaceAll("-", " ")
           .replace(/^./, (char) => char.toUpperCase());
@@ -106,6 +107,7 @@ export default definePipr((pipr) => {
           ...(finding.suggestedFix ? { suggestedFix: finding.suggestedFix } : {}),
         };
       });
+      const { validFindings: inlineFindings } = ctx.review.validateFindings(mappedFindings);
       const attentionCount = result.checks.filter((check) => check.status === "attention").length;
       if (attentionCount > 0) {
         const noun = attentionCount === 1 ? "check" : "checks";
@@ -116,6 +118,10 @@ export default definePipr((pipr) => {
       }
       await ctx.comment({
         main: [
+          hygieneCallout(attentionCount),
+          "",
+          "## 🧭 Summary",
+          "",
           result.summary,
           "",
           "## Policy Checks",
@@ -131,14 +137,15 @@ export default definePipr((pipr) => {
   pipr.command({ pattern: "@pipr hygiene", permission: "write", task });
 });
 
-function policyTable(checks: PolicyCheck[]): string {
-  if (checks.length === 0) {
-    return [
-      "| Policy | Status | Evidence |",
-      "| --- | --- | --- |",
-      "| - | Not applicable | No policy checks were relevant. |",
-    ].join("\\n");
+function hygieneCallout(attentionCount: number): string {
+  if (attentionCount === 0) {
+    return "> ✅ **PR hygiene passed:** All applicable policy checks passed.";
   }
+  const noun = attentionCount === 1 ? "check requires" : "checks require";
+  return \`> ⚠️ **PR hygiene needs attention:** \${attentionCount} policy \${noun} review.\`;
+}
+
+function policyTable(checks: PolicyCheck[]): string {
   return [
     "| Policy | Status | Evidence |",
     "| --- | --- | --- |",

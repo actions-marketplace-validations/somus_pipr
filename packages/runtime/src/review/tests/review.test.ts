@@ -5,6 +5,7 @@ import {
   parseReviewResult,
   reviewResultJsonSchema,
   reviewSchemaExample,
+  validateReviewFindings,
   validateReviewResult,
 } from "../review.js";
 
@@ -27,6 +28,47 @@ const baseFinding = baseReview.inlineFindings[0];
 if (!baseFinding) {
   throw new Error("test fixture missing base finding");
 }
+
+describe("validateReviewFindings", () => {
+  it("preserves custom metadata when canonicalizing and dropping findings", () => {
+    const finding = { ...baseFinding, rangeId: "stale-range", severity: "high" as const };
+    const validated = validateReviewFindings([finding, finding], manifest, {
+      expectedHeadSha: "head",
+    });
+
+    expect(validated.validFindings).toEqual([
+      { ...baseFinding, rangeId: "range-1", severity: "high" },
+    ]);
+    expect(validated.droppedFindings).toEqual([
+      {
+        finding: { ...finding, rangeId: "range-1" },
+        reason: "duplicate finding fingerprint",
+      },
+    ]);
+    expect(validated.validFindings[0]?.severity).toBe("high");
+    expect(validated.droppedFindings[0]?.finding.severity).toBe("high");
+  });
+
+  it("applies path scope to metadata-bearing findings", () => {
+    const finding = { ...baseFinding, severity: "high" as const };
+    const validated = validateReviewFindings([finding], manifest, {
+      pathScopeForFinding: () => ({ include: ["docs/**"] }),
+    });
+
+    expect(validated.validFindings).toHaveLength(0);
+    expect(validated.droppedFindings).toEqual([
+      { finding, reason: "finding path is outside configured paths" },
+    ]);
+  });
+
+  it("rejects a stale manifest before validating generic findings", () => {
+    expect(() =>
+      validateReviewFindings([{ ...baseFinding, severity: "high" as const }], manifest, {
+        expectedHeadSha: "new-head",
+      }),
+    ).toThrow("does not match expected head SHA");
+  });
+});
 
 describe("validateReviewResult", () => {
   it("uses one Review Output for examples and runtime schema", () => {
@@ -96,6 +138,65 @@ describe("validateReviewResult", () => {
     expect(validated.droppedFindings).toHaveLength(0);
   });
 
+  it("canonicalizes an unusable range ID when the finding anchor matches one range", () => {
+    const review: ReviewResult = {
+      ...baseReview,
+      inlineFindings: [{ ...baseFinding, rangeId: "range-1-without-generated-suffix" }],
+    };
+
+    const validated = validateReviewResult(review, manifest, {
+      expectedHeadSha: "head",
+    });
+
+    expect(validated.validFindings).toEqual([{ ...baseFinding, rangeId: "range-1" }]);
+    expect(validated.droppedFindings).toHaveLength(0);
+  });
+
+  it("canonicalizes a valid but mismatched range ID from the finding anchor", () => {
+    const review: ReviewResult = {
+      ...baseReview,
+      inlineFindings: [
+        {
+          ...baseFinding,
+          rangeId: "range-1",
+          startLine: 20,
+          endLine: 21,
+        },
+      ],
+    };
+
+    const validated = validateReviewResult(review, manifest, {
+      expectedHeadSha: "head",
+    });
+
+    expect(validated.validFindings).toEqual([
+      {
+        ...baseFinding,
+        rangeId: "range-2",
+        startLine: 20,
+        endLine: 21,
+      },
+    ]);
+    expect(validated.droppedFindings).toHaveLength(0);
+  });
+
+  it("keeps an unusable range ID dropped when its anchor matches multiple ranges", () => {
+    const review: ReviewResult = {
+      ...baseReview,
+      inlineFindings: [{ ...baseFinding, rangeId: "range-without-a-unique-match" }],
+    };
+
+    const validated = validateReviewResult(review, overlappingRangeManifest(), {});
+
+    expect(validated.validFindings).toHaveLength(0);
+    expect(validated.droppedFindings).toEqual([
+      {
+        finding: review.inlineFindings[0],
+        reason: "unknown rangeId 'range-without-a-unique-match'",
+      },
+    ]);
+  });
+
   it("keeps scoped findings on renamed files when the filter matches the previous path", () => {
     const review: ReviewResult = {
       ...baseReview,
@@ -132,18 +233,10 @@ describe("validateReviewResult", () => {
     ]);
   });
 
-  it("drops semantic mismatches and duplicate fingerprints", () => {
+  it("drops range mismatches and duplicate fingerprints", () => {
     const review: ReviewResult = {
       ...baseReview,
-      inlineFindings: [
-        { ...baseFinding, side: "LEFT" },
-        { ...baseFinding, path: "src/other.ts" },
-        { ...baseFinding, rangeId: "missing" },
-        { ...baseFinding, startLine: 12, endLine: 11 },
-        { ...baseFinding, startLine: 9 },
-        baseFinding,
-        baseFinding,
-      ],
+      inlineFindings: [{ ...baseFinding, startLine: 9 }, baseFinding, baseFinding],
     };
 
     const validated = validateReviewResult(review, manifest, {
@@ -152,10 +245,6 @@ describe("validateReviewResult", () => {
 
     expect(validated.validFindings).toHaveLength(1);
     expect(validated.droppedFindings.map((drop) => drop.reason)).toEqual([
-      "finding side does not match range side",
-      "finding path does not match range path",
-      "unknown rangeId 'missing'",
-      "finding startLine is after endLine",
       "finding lines fall outside the commentable range",
       "duplicate finding fingerprint",
     ]);
@@ -228,6 +317,24 @@ function renamedManifest(): DiffManifest {
             hunkContentHash: "deadbeefcafe",
           },
         ],
+      },
+    ],
+  };
+}
+
+function overlappingRangeManifest(): DiffManifest {
+  const file = manifest.files.find((candidate) => candidate.path === "src/a.ts");
+  const range = file?.commentableRanges[0];
+  if (!file || !range) {
+    throw new Error("test fixture missing source range");
+  }
+
+  return {
+    ...manifest,
+    files: [
+      {
+        ...file,
+        commentableRanges: [...file.commentableRanges, { ...range, id: "range-overlap" }],
       },
     ],
   };

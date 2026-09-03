@@ -1,3 +1,4 @@
+import { createPublicationWorkflow } from "../publication/workflow.js";
 import type { CodeHostAdapter } from "../types.js";
 import {
   type AzureDevOpsClient,
@@ -9,16 +10,15 @@ import {
   loadAzureDevOpsInlineThreadContexts,
   loadAzureDevOpsPriorMainComment,
   loadAzureDevOpsPriorReviewState,
-  publishAzureDevOpsCommandResponse,
-  publishAzureDevOpsPlan,
-  publishAzureDevOpsThreadActions,
 } from "./publication.js";
+import { createAzureDevOpsPublicationDriver } from "./publication-driver.js";
 import { ensureAzureDevOpsHeadCheckout } from "./workspace.js";
 
 export function createAzureDevOpsHostAdapter(
   options: { env?: NodeJS.ProcessEnv; client?: AzureDevOpsClient } = {},
 ): CodeHostAdapter {
   const client = options.client ?? createAzureDevOpsClient(options.env);
+  const publication = createPublicationWorkflow(createAzureDevOpsPublicationDriver(client));
   return {
     id: "azure-devops",
     capabilities: {
@@ -62,11 +62,7 @@ export function createAzureDevOpsHostAdapter(
         );
       },
     },
-    publication: {
-      publish: ({ plan, change }) => publishAzureDevOpsPlan({ client, plan, change }),
-      publishCommandResponse: (args) => publishAzureDevOpsCommandResponse({ client, ...args }),
-      publishThreadActions: (args) => publishAzureDevOpsThreadActions({ client, ...args }),
-    },
+    publication,
     comments: {
       loadPriorReviewState: ({ change }) => loadAzureDevOpsPriorReviewState({ client, change }),
       loadPriorMainComment: ({ change }) => loadAzureDevOpsPriorMainComment({ client, change }),

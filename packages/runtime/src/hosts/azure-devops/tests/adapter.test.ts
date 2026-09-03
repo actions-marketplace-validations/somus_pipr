@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { buildPublicationPlan, type InlinePublicationItem } from "../../../review/comment.js";
+import type { InlinePublicationItem } from "../../../publication/types.js";
+import { buildPublicationPlan } from "../../../review/comment.js";
 import {
   buildPriorReviewState,
   renderInlineFindingMarker,
@@ -55,7 +56,7 @@ describe("Azure DevOps host adapter", () => {
       mainComment: { action: "updated" },
       inlineComments: { posted: 0, skipped: 1, failed: 0 },
     });
-    expect(client.createdThreadBodies[1]).toMatchObject({
+    expect(client.createdThreadBodies[0]).toMatchObject({
       threadContext: {
         filePath: "/src/a.ts",
         rightFileStart: { line: 2, offset: 1 },
@@ -86,6 +87,59 @@ describe("Azure DevOps host adapter", () => {
       "head changed",
     );
     expect(client.threads).toEqual([]);
+  });
+
+  it("rechecks the head immediately before a progress write", async () => {
+    const client = new FakeAzureDevOpsClient();
+    client.afterGetPullRequest = () => {
+      client.afterGetPullRequest = undefined;
+      client.pullRequest = {
+        ...client.pullRequest,
+        lastMergeSourceCommit: { commitId: "new-head" },
+      };
+    };
+    const adapter = createAzureDevOpsHostAdapter({ client });
+
+    await expect(
+      adapter.publication?.publishReviewProgress?.({
+        change,
+        reviewedHeadSha: "head",
+        renderBody: () => "Progress.",
+      }),
+    ).rejects.toThrow("head changed");
+    expect(client.mainCreates).toBe(0);
+  });
+
+  it("rechecks the progress token immediately before an update write", async () => {
+    const client = new FakeAzureDevOpsClient();
+    const adapter = createAzureDevOpsHostAdapter({ client });
+    const publishProgress = adapter.publication?.publishReviewProgress;
+    if (!publishProgress) throw new Error("Expected progress publication");
+    await publishProgress({
+      change,
+      reviewedHeadSha: "head",
+      renderBody: () => progressBody("old-token"),
+    });
+    let headReads = 0;
+    client.afterGetPullRequest = () => {
+      headReads += 1;
+      if (headReads !== 2) return;
+      client.afterGetPullRequest = undefined;
+      const comment = client.threads[0]?.comments[0];
+      if (!comment) throw new Error("Expected progress comment");
+      comment.content = progressBody("new-token");
+    };
+
+    await expect(
+      publishProgress({
+        change,
+        reviewedHeadSha: "head",
+        expectedToken: "old-token",
+        renderBody: () => progressBody("old-token"),
+      }),
+    ).resolves.toEqual({ status: "superseded" });
+    expect(client.mainUpdates).toBe(0);
+    expect(client.threads[0]?.comments[0]?.content).toBe(progressBody("new-token"));
   });
 
   it("reports an inline publication failure when the reviewed blob cannot be read", async () => {
@@ -224,23 +278,21 @@ describe("Azure DevOps host adapter", () => {
     expect(inline.status).toBe("fixed");
   });
 
-  it.each([
-    "fixed",
-    "closed",
-    "wontFix",
-    "byDesign",
-  ])("loads %s threads as resolved", async (status) => {
-    const client = new FakeAzureDevOpsClient();
-    const adapter = createAzureDevOpsHostAdapter({ client });
-    await adapter.publication?.publish({ change, plan: publicationPlan() });
-    const inline = client.threads.find((thread) => thread.threadContext?.filePath);
-    if (!inline) throw new Error("Expected inline thread");
-    inline.status = status;
+  it.each(["fixed", "closed", "wontFix", "byDesign"])(
+    "loads %s threads as resolved",
+    async (status) => {
+      const client = new FakeAzureDevOpsClient();
+      const adapter = createAzureDevOpsHostAdapter({ client });
+      await adapter.publication?.publish({ change, plan: publicationPlan() });
+      const inline = client.threads.find((thread) => thread.threadContext?.filePath);
+      if (!inline) throw new Error("Expected inline thread");
+      inline.status = status;
 
-    await expect(adapter.comments?.loadInlineThreadContexts?.({ change })).resolves.toMatchObject([
-      { threadResolved: true },
-    ]);
-  });
+      await expect(adapter.comments?.loadInlineThreadContexts?.({ change })).resolves.toMatchObject(
+        [{ threadResolved: true }],
+      );
+    },
+  );
 
   it("creates and updates one command response thread", async () => {
     const client = new FakeAzureDevOpsClient();
@@ -293,7 +345,7 @@ describe("Azure DevOps host adapter", () => {
     ];
 
     await adapter.publication?.publish({ change, plan });
-    expect(client.createdThreadBodies[1]).toMatchObject({
+    expect(client.createdThreadBodies[0]).toMatchObject({
       threadContext: {
         filePath: "/src/old.ts",
         leftFileStart: { line: 3, offset: 1 },
@@ -319,14 +371,14 @@ describe("Azure DevOps host adapter", () => {
 
     await adapter.publication?.publish({ change, plan });
 
-    expect(client.createdThreadBodies[1]).toMatchObject({
+    expect(client.createdThreadBodies[0]).toMatchObject({
       threadContext: {
         filePath: "/src/a.ts",
         rightFileStart: { line: 2, offset: 1 },
         rightFileEnd: { line: 2, offset: 1 },
       },
     });
-    const comments = client.createdThreadBodies[1]?.comments as
+    const comments = client.createdThreadBodies[0]?.comments as
       | Array<{ content: string }>
       | undefined;
     expect(comments?.[0]?.content).toContain("```\nconst value = 2;\n```");
@@ -393,7 +445,7 @@ describe("Azure DevOps host adapter", () => {
         change: unicodeChange,
         plan,
       });
-      expect(client.createdThreadBodies[1]).toMatchObject({
+      expect(client.createdThreadBodies[0]).toMatchObject({
         threadContext: { rightFileEnd: { line: 1, offset: 14 } },
       });
     } finally {
@@ -404,6 +456,14 @@ describe("Azure DevOps host adapter", () => {
 
 defineCodeHostAdapterConformanceSuite({
   name: "Azure DevOps",
+  capabilities: {
+    commandComments: true,
+    reviewCommentReplies: true,
+    threadResolution: true,
+    multilineInlineComments: true,
+    suggestedChanges: false,
+    statuses: true,
+  },
   createHarness: createAzureDevOpsConformanceHarness,
 });
 
@@ -428,6 +488,15 @@ const change: ChangeRequestEventContext = {
   },
   workspace: fixtureWorkspace,
 };
+
+function progressBody(token: string): string {
+  return [
+    "<!-- pipr:main-comment change=7 version=1 -->",
+    `<!-- pipr:progress:start token=${token} head=head stage=preparing-workspace state=running -->`,
+    "## Progress",
+    "<!-- pipr:progress:end -->",
+  ].join("\n");
+}
 
 function publicationPlan() {
   const inlineItem: InlinePublicationItem = {
@@ -482,6 +551,8 @@ function publicationPlan() {
 class FakeAzureDevOpsClient implements AzureDevOpsClient {
   organization = "org";
   project = "project";
+  collectionUrl = "https://dev.azure.com/org";
+  instanceId = async () => "host-instance-id";
   threads: AzureDevOpsThread[] = [];
   createdThreadBodies: Array<Record<string, unknown>> = [];
   statusBodies: Array<Record<string, unknown>> = [];
@@ -502,6 +573,7 @@ class FakeAzureDevOpsClient implements AzureDevOpsClient {
     summary?: string;
     headSha: string;
   }> = [];
+  afterGetPullRequest?: () => void;
   afterListThreads?: () => void;
   currentUserUniqueName: string | undefined = "pipr@example.com";
   pullRequest: AzureDevOpsPullRequest = {
@@ -529,7 +601,11 @@ class FakeAzureDevOpsClient implements AzureDevOpsClient {
     this.permissionActors.push(actor);
     return this.permission;
   };
-  getPullRequest = async () => this.pullRequest;
+  getPullRequest = async () => {
+    const pullRequest = this.pullRequest;
+    this.afterGetPullRequest?.();
+    return pullRequest;
+  };
   loadChange = async () => ({
     repository: change.repository,
     coordinates: {
@@ -687,7 +763,8 @@ async function createAzureDevOpsConformanceHarness(): Promise<CodeHostAdapterCon
         eventType: "git.pullrequest.updated",
         resource,
         resourceContainers: {
-          account: { baseUrl: "https://dev.azure.com/org/" },
+          account: { id: "account-id", baseUrl: "https://dev.azure.com/org/" },
+          collection: { id: "collection-id", baseUrl: "https://dev.azure.com/org/" },
           project: { id: "project-id", baseUrl: "https://dev.azure.com/org/project/" },
         },
       });
@@ -783,6 +860,19 @@ async function createAzureDevOpsConformanceHarness(): Promise<CodeHostAdapterCon
           ...client.pullRequest,
           lastMergeSourceCommit: { commitId: "new-head" },
         };
+      };
+    },
+    supersedeProgressDuringPreflight(body) {
+      client.afterListThreads = () => {
+        client.afterListThreads = undefined;
+        client.threads = client.threads.map((thread) => ({
+          ...thread,
+          comments: thread.comments.map((comment) =>
+            comment.content?.includes("pipr:main-comment")
+              ? { ...comment, content: body }
+              : comment,
+          ),
+        }));
       };
     },
     failNextInline() {

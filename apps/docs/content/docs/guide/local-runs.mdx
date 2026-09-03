@@ -1,237 +1,88 @@
 ---
 title: "Local runs"
-description: "Run Pipr review tasks locally without publishing code-host comments."
+description: "Run Pipr review tasks against local git changes without publishing comments."
 ---
 
-Local runs execute the same change-request Review Tasks without using a code host's publication APIs. Use them before committing config changes, while debugging reviewer prompts, or when validating a recipe in a branch.
+Local review executes configured change-request tasks against git state and prints the result. Use it while tuning config or prompts, before enabling hosted publication.
 
-## Commands
+## Review working-tree changes
 
-Choose a base and optional head based on whether you are reviewing working-tree changes or committed refs.
-
-### Review working tree
-
-Run the configured change-request review tasks:
+Choose an explicit comparison base:
 
 ```bash
+git fetch origin main
 pipr review --base origin/main
 ```
 
-When `--head` is omitted, Pipr reviews the working tree. That includes committed changes after the merge base plus staged and unstaged edits to tracked files.
+Without `--head`, Pipr reviews committed changes after the merge base plus staged and unstaged edits to tracked files.
 
-### Review a ref
+## Review committed refs
 
-Set an explicit head when reviewing a committed ref instead of the working tree:
-
-```bash
-pipr review --base origin/main --head HEAD~1
-```
-
-### Custom config directory
-
-Use a custom config directory when the repository does not use `.pipr`:
+Set `--head` for a strict ref-to-ref comparison:
 
 ```bash
-pipr review --config-dir .config/pipr --base origin/main
+pipr review --base origin/main --head feature/review-policy
 ```
 
-### Local Pi executable
+Use `--config-dir <path>` for a nonstandard config directory.
 
-Use a custom Pi executable during local development:
+## Select local tasks
+
+Local review runs each unique task registered through `pipr.on.changeRequest(...)`. It ignores hosted action filters and skips tasks declared with `local: false`.
+
+Use `ctx.run.trigger === "local"` when a task should run in both environments but render different output.
+
+## Read local output
+
+Pipr writes progress to stderr and final review output to stdout. Normal output is Markdown followed by local inline findings.
+
+Use JSON when another tool consumes the result:
 
 ```bash
-pipr review --base origin/main --pi-executable /path/to/pi
+pipr review --base origin/main --json
 ```
 
-## What local runs do
+The top-level `formatVersion` is currently `2`. Check it before reading other fields. Local results include public comments, findings, dropped findings, task checks, repair status, and a bounded run summary; publication is disabled.
 
-Local review exercises config, diff construction, Pi execution, and rendering while keeping provider publication disabled.
+## Model authentication
 
-### Runtime steps
+Models with `apiKey` read the declared secret from the local process environment. Bun also loads standard environment files from the working directory.
 
-Local runs:
+Models without `apiKey` use Pi authentication from:
 
-- load the local `.pipr/config.ts`
-- validate the runtime plan
-- build a Diff Manifest from local git state
-- execute every unique task registered with `pipr.on.changeRequest(...)`
-- skip tasks declared with `local: false`
-- run Pi through `ctx.pi.run(...)`
-- stream readable progress logs to stderr
-- print the rendered final output to stdout, or structured output with `--json`
+1. `--pi-agent-dir`
+2. `PI_CODING_AGENT_DIR`
+3. `$HOME/.pi/agent`
 
-### Disabled publication
+Pipr still uses the provider and model declared in config. Hosted runs do not receive this local directory, so select an environment-backed model outside local runs.
 
-Local runs do not publish Main Review Comments, Inline Review Comments, command response comments, or Check Runs.
+## Trust local config
 
-## Base and head
+Local review loads `.pipr/config.ts` from the current workspace. Run it only on branches whose config and task code you trust, because that code can access exported environment values.
 
-The base selects the comparison point; the optional head selects committed content instead of the working tree.
-
-### Required base
-
-`--base` is required because Pipr needs a comparison point. Use a branch name, remote ref, or commit SHA:
-
-```bash
-pipr review --base origin/main
-pipr review --base main
-pipr review --base 2a4f6c9
-```
-
-### Working tree head
-
-When `--head` is omitted, Pipr compares `--base` to the current working tree. This is the usual local workflow when you want to review uncommitted edits on a synced branch:
-
-```bash
-pipr review --base main
-```
-
-### Ref-to-ref comparison
-
-Set `--head` explicitly when you want a strict ref-to-ref comparison:
-
-```bash
-pipr review --base origin/main --head HEAD
-pipr review --base origin/main --head feature-branch
-```
-
-## Local task selection
-
-Local review runs each unique change-request task unless the task explicitly opts out.
-
-### Review recipe
-
-`pipr review` runs tasks registered for change-request events:
-
-```ts twoslash
-// @include: pipr-reviewer
-pipr.review({
-  id: "review",
-  reviewer,
-  entrypoints: {
-    changeRequest: ["opened", "updated", "reopened", "ready"],
-  },
-});
-```
-
-### Custom change-request tasks
-
-Custom tasks use `pipr.on.changeRequest(...)`:
-
-```ts twoslash
-// @include: pipr-security-agent
-const task = pipr.task({
-  name: "security",
-  async run(ctx) {
-    const manifest = await ctx.change.diffManifest({ compressed: true });
-    const result = await ctx.pi.run(securityAgent, { manifest });
-    const local = ctx.platform.id === "local";
-    await ctx.comment({
-      main: local
-        ? `${result.summary.body}\n\n## Inline Findings\n\n${result.inlineFindings
-            .map((finding) => `- ${finding.path}: ${finding.body}`)
-            .join("\n")}`
-        : result.summary.body,
-      inlineFindings: result.inlineFindings,
-    });
-  },
-});
-
-pipr.on.changeRequest({ actions: ["opened", "updated"], task });
-```
-
-### CI-only tasks
-
-Local review ignores the configured action filters and runs every unique change-request task. Mark tasks that should only run in CI with `local: false`:
-
-```ts
-const expensive = pipr.task({
-  name: "expensive",
-  local: false,
-  async run(ctx) {
-    // CI only
-  },
-});
-```
-
-Use `ctx.platform.id === "local"` when a task should still run locally but render different text. Use `local: false` when the task should not run locally at all.
-
-## Output
-
-Local review separates progress logs from the rendered or structured task result.
-
-### Stdout and stderr
-
-During local review, Pipr writes progress logs to stderr and the final review output to stdout. The default stdout format is Markdown without Pipr's internal comment marker, followed by any local inline findings. `--json` emits a stable structured summary containing the marker-free Main Review Comment, public Review Findings, dropped findings, task checks, public provider identity, provider models, and repair status. Runtime publication plans, Diff Manifests, provider credential metadata, and internal finding state are not part of this interface.
-
-### JSON format version
-
-Every `pipr review --json` result, including skipped results, contains the top-level integer `formatVersion`. The current value is `1`, independent of the Pipr CLI version. Check this field before reading other properties, and reject values your script doesn't support.
-
-Pipr keeps the current format version when it adds backward-compatible fields, so ignore unknown fields when you parse a supported version. Pipr increments `formatVersion` when a change requires you to parse existing fields differently.
-
-## Environment
-
-Provide model credentials through the trusted local process environment.
-
-### Provider secrets
-
-Local runs read provider secrets from the process environment. Because the CLI runs on Bun, standard Bun env files in the working directory are loaded automatically:
-
-```bash
-DEEPSEEK_API_KEY=...
-pipr review --base origin/main
-```
-
-When running the CLI from source, pass explicit env files with Bun:
-
-```bash
-bun --env-file=.pipr/.env packages/cli/src/main.ts review --base origin/main
-```
-
-### Source checkout trust
-
-Unlike hosted change-request runs, local review loads `.pipr/config.ts` from the current workspace. Run it only on branches whose config and task code you trust, because those tasks can access exported env vars and Bun-loaded `.env` values through `ctx.secret(...)`.
-
-## Config validation
-
-Check the runtime plan before spending model quota.
-
-### Check and inspect
-
-Use these before running a model:
-
-```bash
-pipr check
-pipr inspect
-```
-
-### Required env validation
-
-`pipr check` type-loads config and validates the runtime plan. Add `--require-env` when you want local checks to fail if configured provider env vars are missing:
+Before spending model quota:
 
 ```bash
 pipr check --require-env
+pipr inspect
 ```
 
-`pipr inspect` prints the registered models, agents, tasks, commands, tools, publication settings, and limits.
+## Capture diagnostics
 
-## Local versus hosted runs
+Capture a local run when you need timing, retry, tool, validation, or output evidence:
 
-Local and hosted runs share task behavior but differ in config trust, diff source, secrets, and publication.
+```bash
+pipr review --base origin/main --trace
+```
 
-### Behavior matrix
+Pass a path to `--trace` to choose the store. See [Debug captured runs](/docs/guide/run-observability) for inspection and security guidance.
 
-Use the hosted path when the result must reach the code host.
+## Local and hosted differences
 
-| Behavior | Local run | Hosted change-request run |
+| Behavior | Local | Hosted |
 | --- | --- | --- |
-| Config source | Local workspace | Trusted base commit |
-| Diff source | Working tree by default, or local git refs with `--head` | Exact change-request head and base |
-| Comments | Disabled | Enabled when publication succeeds |
-| Commands | Not dispatched | Run from native comment events through the selected adapter |
-| Provider secrets | Exported env vars or Bun-loaded `.env` files | CI or trusted-worker secret store |
-| Logs | Human-readable stderr | CI or trusted-worker logs |
-| Best use | Config iteration and prompt debugging | Production change-request review |
-
-Use the [GitHub](/docs/guide/github-action), [GitLab](/docs/guide/gitlab), [Azure DevOps](/docs/guide/azure-devops), or [Bitbucket Cloud](/docs/guide/bitbucket) guide for production delivery behavior.
+| Config source | Current workspace | Base commit |
+| Diff source | Working tree or explicit refs | Exact change-request base and head |
+| Comments and statuses | Disabled | Enabled when configured |
+| Authentication | Environment keys or local Pi auth | Delivery secret store |
+| Best use | Config and prompt iteration | Production review |

@@ -20,12 +20,6 @@ const staticDocsPages = docsPageSlugs.flatMap((slugs) => [
       crawlLinks: false,
     },
   },
-  {
-    path: `/og/docs/${[...slugs, "image.webp"].join("/")}`,
-    prerender: {
-      crawlLinks: false,
-    },
-  },
 ]);
 
 function getDocsPageSlugs(directory: string, parents: string[] = []): string[][] {
@@ -66,7 +60,7 @@ export default defineConfig(({ command, isPreview }) => ({
     },
     nitro: {
       resolve: {
-        external: ["react", "react-dom"],
+        external: ["react", "react-dom", "@takumi-rs/image-response"],
       },
     },
   },

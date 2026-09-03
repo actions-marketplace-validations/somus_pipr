@@ -1,10 +1,10 @@
-import type { AgentPromptContext, PathFilter, Schema } from "@usepipr/sdk";
+import type { AgentPromptContext, PathFilter, PiprRunContext, Schema } from "@usepipr/sdk";
 import { type RuntimeAgent, type RuntimeAgentTool, renderPromptValue } from "@usepipr/sdk/internal";
 import { compact } from "lodash-es";
 import { piReadOnlyToolNames } from "../../pi/contract.js";
+import type { PriorReviewState } from "../../publication/types.js";
 import { isRecord } from "../../shared/record.js";
 import { maxInlineFindingBodyCharacters } from "../inline-finding-limits.js";
-import type { PriorReviewState } from "../prior-state.js";
 import { reviewResultSchemaId, reviewSchemaExample } from "../review.js";
 import type { PreparedDiffManifestContext } from "./diff-manifest-context.js";
 import { schemaContainsReviewFinding } from "./review-schema.js";
@@ -14,7 +14,7 @@ export type AgentToolResolution = {
 };
 
 export type PluginToolExecutionContext = {
-  run: { id: string };
+  run: PiprRunContext;
   repository: { root: string; name: string };
   change: {
     number: number;
@@ -28,7 +28,7 @@ export type PluginToolExecutionContext = {
 
 export type AgentRunContext = {
   prompt: {
-    runId: string;
+    run: PiprRunContext;
     repository: PluginToolExecutionContext["repository"];
     change: PluginToolExecutionContext["change"];
     platform: PluginToolExecutionContext["platform"];
@@ -218,13 +218,14 @@ function reviewPolicyPrompt(schema: Schema<unknown>): string | undefined {
       "Review only changed behavior.",
       "Report only actionable defects, security risks, regressions, or meaningful test gaps.",
       "Before emitting a finding, verify that the changed code introduces or exposes the issue, repository evidence supports it, and the impact is concrete. If any part is uncertain, omit it.",
+      "Moved or copied code exposes defects in its new changed location even when the same defect existed at the old location. Report such a defect only when it is concrete and anchored in the moved or copied changed code. Do not report unrelated pre-existing defects outside changed code.",
       "When changed behavior crosses a function, type, API, configuration, or data boundary, inspect relevant callers, callees, and tests before deciding whether the change is defective or intentionally coordinated.",
       "Put each actionable issue in the schema's finding collection. Do not leave actionable defects or test gaps only in the summary.",
       "When the output includes a summary, base it only on changed behavior and evidence available in the Diff Manifest or read tools. Do not claim tests or checks ran, passed, or failed unless their output is present.",
       "Finding bodies must be publication-ready review prose, not analysis notes.",
       `State the concrete defect and user-visible or runtime impact directly. Keep each body to one short paragraph, at most two sentences, and at most ${maxInlineFindingBodyCharacters} characters. Treat ${maxInlineFindingBodyCharacters} as a hard ceiling, not a target; prefer 250-450 characters when possible.`,
       "Do not include step-by-step reasoning, broad context, praise, restated diff, alternatives, or code snippets unless they are necessary to identify the defect.",
-      "Never copy a secret-looking literal from changed code into the review summary, inline finding body, or suggestedFix. Describe only the secret kind and location.",
+      "Never copy a secret-looking literal from changed code into any publishable output field, including a review summary, inline finding body, suggestedFix, custom title or rationale. Describe only the secret kind and location.",
       "Omit speculative, style-only, broad refactor, external-fact, and out-of-diff findings.",
       "Use read tools when more context is needed. If evidence is insufficient, omit the finding.",
       "Emit one inline finding per issue, anchored to a valid span within one Diff Manifest commentable range.",

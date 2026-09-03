@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { buildPublicationPlan, type InlinePublicationItem } from "../../../review/comment.js";
+import type { InlinePublicationItem } from "../../../publication/types.js";
+import { buildPublicationPlan } from "../../../review/comment.js";
 import { buildPriorReviewState, renderInlineFindingMarker } from "../../../review/prior-state.js";
 import { priorReviewForTask } from "../../../review/task/task-output.js";
 import type { ChangeRequestEventContext } from "../../../types.js";
@@ -12,8 +13,8 @@ import {
 } from "../../tests/conformance.js";
 import type { CodeHostStatusState, RepositoryPermission } from "../../types.js";
 import { createBitbucketHostAdapter } from "../adapter.js";
-import type { BitbucketClient, BitbucketComment, BitbucketPullRequest } from "../client.js";
 import { normalizeBitbucketMarkdown, renderBitbucketMarkdown } from "../markdown.js";
+import type { BitbucketClient, BitbucketComment, BitbucketPullRequest } from "../models.js";
 
 describe("Bitbucket Cloud adapter", () => {
   it("publishes idempotent main, multiline inline, commands, resolution, and statuses", async () => {
@@ -28,7 +29,7 @@ describe("Bitbucket Cloud adapter", () => {
       mainComment: { action: "updated" },
       inlineComments: { skipped: 1 },
     });
-    expect(client.createdBodies[1]).toMatchObject({
+    expect(client.createdBodies[0]).toMatchObject({
       inline: { path: "src/a.ts", to: 4, start_to: 2 },
     });
     const command = { change, sourceCommentId: "9", commandName: "ask", body: "answer" };
@@ -71,6 +72,61 @@ describe("Bitbucket Cloud adapter", () => {
     }
   });
 
+  it("rechecks the head immediately before a progress write", async () => {
+    const client = new FakeBitbucketClient();
+    client.afterGetPullRequest = () => {
+      client.afterGetPullRequest = undefined;
+      client.pullRequest = {
+        ...client.pullRequest,
+        source: { ...client.pullRequest.source, commit: { hash: "new-head" } },
+      };
+    };
+    const adapter = createBitbucketHostAdapter({ client });
+
+    await expect(
+      adapter.publication?.publishReviewProgress?.({
+        change,
+        reviewedHeadSha: "head",
+        renderBody: () => "Progress.",
+      }),
+    ).rejects.toThrow("endpoints changed");
+    expect(client.mainCreates).toBe(0);
+  });
+
+  it("rechecks the progress token immediately before an update write", async () => {
+    const client = new FakeBitbucketClient();
+    const adapter = createBitbucketHostAdapter({ client });
+    const publishProgress = adapter.publication?.publishReviewProgress;
+    if (!publishProgress) throw new Error("Expected progress publication");
+    await publishProgress({
+      change,
+      reviewedHeadSha: "head",
+      renderBody: () => progressBody("old-token"),
+    });
+    let headReads = 0;
+    client.afterGetPullRequest = () => {
+      headReads += 1;
+      if (headReads !== 2) return;
+      client.afterGetPullRequest = undefined;
+      const comment = client.comments[0];
+      if (!comment) throw new Error("Expected progress comment");
+      comment.content.raw = renderBitbucketMarkdown(progressBody("new-token"));
+    };
+
+    await expect(
+      publishProgress({
+        change,
+        reviewedHeadSha: "head",
+        expectedToken: "old-token",
+        renderBody: () => progressBody("old-token"),
+      }),
+    ).resolves.toEqual({ status: "superseded" });
+    expect(client.mainUpdates).toBe(0);
+    expect(normalizeBitbucketMarkdown(client.comments[0]?.content.raw ?? "")).toBe(
+      progressBody("new-token"),
+    );
+  });
+
   it("publishes Markdown-only comments while preserving hidden publication metadata", async () => {
     const client = new FakeBitbucketClient();
     const adapter = createBitbucketHostAdapter({ client });
@@ -98,8 +154,8 @@ describe("Bitbucket Cloud adapter", () => {
       expect(body).not.toMatch(/<\/?[A-Za-z][^>]*>/);
       expect(body).toContain("[pipr-metadata-");
     }
-    expect(published[0]).toContain("# Pipr Review");
-    expect(published[1]).toContain("### Rationale");
+    expect(published[0]).toContain("### Rationale");
+    expect(published[1]).toContain("# Pipr Review");
 
     await expect(adapter.publication?.publish({ change, plan })).resolves.toMatchObject({
       mainComment: { action: "updated" },
@@ -173,8 +229,40 @@ describe("Bitbucket Cloud adapter", () => {
 
     await adapter.publication?.publish({ change, plan });
 
-    expect(client.createdBodies[1]).toMatchObject({
+    expect(client.createdBodies[0]).toMatchObject({
       inline: { path: "src/old.ts", from: 4, start_from: 2 },
+    });
+  });
+
+  it("dedupes renamed Data Center LEFT comments when finding IDs change", async () => {
+    const client = new FakeBitbucketClient();
+    client.deployment = "data-center";
+    const adapter = createBitbucketHostAdapter({ client });
+    const plan = publicationPlan();
+    const item = plan.inlineItems[0];
+    if (!item) throw new Error("Expected inline fixture");
+    plan.inlineItems = [
+      {
+        ...item,
+        path: "src/new.ts",
+        previousPath: "src/old.ts",
+        side: "LEFT",
+      },
+    ];
+
+    await adapter.publication?.publish({ change, plan });
+    const renamed = plan.inlineItems[0];
+    if (!renamed) throw new Error("Expected renamed inline fixture");
+    renamed.findingId = "renamed-finding";
+    renamed.marker = "pipr:finding:renamed-finding:head";
+    renamed.body = `${renderInlineFindingMarker("renamed-finding", "head")}\nFix`;
+
+    await expect(adapter.publication?.publish({ change, plan })).resolves.toMatchObject({
+      inlineComments: { posted: 0, skipped: 1 },
+    });
+    expect(client.createdBodies.filter((body) => body.inline)).toHaveLength(1);
+    expect(client.createdBodies[0]).toMatchObject({
+      inline: { path: "src/new.ts", src_path: "src/old.ts", from: 4 },
     });
   });
 
@@ -243,6 +331,14 @@ describe("Bitbucket Cloud adapter", () => {
 
 defineCodeHostAdapterConformanceSuite({
   name: "Bitbucket Cloud",
+  capabilities: {
+    commandComments: true,
+    reviewCommentReplies: true,
+    threadResolution: true,
+    multilineInlineComments: true,
+    suggestedChanges: false,
+    statuses: true,
+  },
   createHarness: createBitbucketConformanceHarness,
 });
 
@@ -266,6 +362,15 @@ const change: ChangeRequestEventContext = {
   },
   workspace: "/workspace",
 };
+
+function progressBody(token: string): string {
+  return [
+    "<!-- pipr:main-comment change=7 version=1 -->",
+    `<!-- pipr:progress:start token=${token} head=head stage=preparing-workspace state=running -->`,
+    "## Progress",
+    "<!-- pipr:progress:end -->",
+  ].join("\n");
+}
 
 function publicationPlan() {
   const item: InlinePublicationItem = {
@@ -318,6 +423,7 @@ function publicationPlan() {
 }
 
 class FakeBitbucketClient implements BitbucketClient {
+  deployment: BitbucketClient["deployment"] = "cloud";
   workspace = "workspace";
   repository = "repository";
   comments: BitbucketComment[] = [];
@@ -341,6 +447,7 @@ class FakeBitbucketClient implements BitbucketClient {
     summary?: string;
     headSha: string;
   }> = [];
+  afterGetPullRequest?: () => void;
   afterListComments?: () => void;
   currentUserUuid: string | undefined = "{bot}";
   pullRequest: BitbucketPullRequest = {
@@ -365,7 +472,11 @@ class FakeBitbucketClient implements BitbucketClient {
     this.permissionActors.push(actor);
     return this.permission;
   };
-  getPullRequest = async () => this.pullRequest;
+  getPullRequest = async () => {
+    const pullRequest = this.pullRequest;
+    this.afterGetPullRequest?.();
+    return pullRequest;
+  };
   loadChange = async () => ({
     repository: change.repository,
     coordinates: change.coordinates as NonNullable<typeof change.coordinates>,
@@ -531,6 +642,19 @@ async function createBitbucketConformanceHarness(): Promise<CodeHostAdapterConfo
           ...client.pullRequest,
           source: { ...client.pullRequest.source, commit: { hash: "new-head" } },
         };
+      };
+    },
+    supersedeProgressDuringPreflight(body) {
+      client.afterListComments = () => {
+        client.afterListComments = undefined;
+        client.comments = client.comments.map((comment) =>
+          normalizeBitbucketMarkdown(comment.content.raw).includes("pipr:main-comment")
+            ? {
+                ...comment,
+                content: { ...comment.content, raw: renderBitbucketMarkdown(body) },
+              }
+            : comment,
+        );
       };
     },
     failNextInline() {

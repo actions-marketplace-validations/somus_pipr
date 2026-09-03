@@ -13,7 +13,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   const diagnosticOutput = pipr.schema({
@@ -49,7 +49,7 @@ export default definePipr((pipr) => {
     async run(ctx) {
       const manifest = await ctx.change.diffManifest({ compressed: true });
       const result = await ctx.pi.run(diagnostics, { manifest });
-      const inlineFindings: ReviewFinding[] = result.diagnostics.map((diagnostic) => ({
+      const mappedFindings: ReviewFinding[] = result.diagnostics.map((diagnostic) => ({
         body: diagnostic.body,
         path: diagnostic.path,
         rangeId: diagnostic.rangeId,
@@ -58,8 +58,9 @@ export default definePipr((pipr) => {
         endLine: diagnostic.endLine,
         ...(diagnostic.suggestedFix ? { suggestedFix: diagnostic.suggestedFix } : {}),
       }));
+      const { validFindings: inlineFindings } = ctx.review.validateFindings(mappedFindings);
       await ctx.comment({
-        main: result.summary,
+        main: ["## 🧭 Summary", "", result.summary].join("\\n"),
         inlineFindings,
       });
     },

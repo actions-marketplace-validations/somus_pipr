@@ -1,4 +1,10 @@
 import type {
+  PriorReviewState,
+  PublicationMetadata,
+  PublicationPlan,
+  ThreadAction,
+} from "../publication/types.js";
+import type {
   ChangeRequestEventContext,
   CommentableRange,
   DiffManifest,
@@ -8,14 +14,10 @@ import type {
 import {
   buildPublicationPlan,
   type InlineCommentDraft,
-  type PublicationMetadata,
-  type PublicationPlan,
   prepareInlinePublicationItemsForPublishableFindings,
   preparePublishableInlineFindings,
-  type ThreadAction,
 } from "./comment.js";
-import { buildPriorReviewState, type PriorReviewState } from "./prior-state.js";
-
+import { buildPriorReviewState } from "./prior-state.js";
 export type BuildCommentPublishingPlanOptions = {
   event: Pick<ChangeRequestEventContext, "change">;
   main: string;
@@ -58,6 +60,7 @@ export function buildCommentPublishingPlan(
     reviewedHeadSha: options.event.change.head.sha,
     selectedTasks: options.metadata.selectedTasks,
     stats: options.metadata.stats,
+    workflowUrl: options.metadata.workflowUrl,
   });
   const inlineCommentDrafts = prepareInlinePublicationItemsForPublishableFindings({
     publishableFindings: publishableInlineFindings,

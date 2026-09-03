@@ -13,7 +13,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   pipr.config({ publication: { maxInlineComments: 6 } });
@@ -98,8 +98,9 @@ export default definePipr((pipr) => {
       }
       const manifest = await ctx.change.diffManifest({ compressed: true });
       const result = await ctx.pi.run(fixer, { manifest });
-      const deterministicCandidates = result.suggestions.filter(
-        (suggestion) => isPublishableSuggestion(suggestion, manifest),
+      const { validFindings } = ctx.review.validateFindings(result.suggestions);
+      const deterministicCandidates = validFindings.filter((suggestion) =>
+        isPublishableSuggestion(suggestion, manifest),
       );
       const publishableSuggestions =
         deterministicCandidates.length === 0
@@ -127,14 +128,21 @@ export default definePipr((pipr) => {
           suggestedFix: suggestion.suggestedFix,
         };
       });
-      await ctx.comment({
-        main: [
-          suggestionSummary(publishableSuggestions.length),
+      const sections = [
+        "## 🧭 Summary",
+        "",
+        suggestionSummary(publishableSuggestions.length),
+      ];
+      if (publishableSuggestions.length > 0) {
+        sections.push(
           "",
-          "## Exact Suggested Changes",
+          "## 🛠️ Exact Suggested Changes",
           "",
           suggestionsTable(publishableSuggestions),
-        ].join("\\n"),
+        );
+      }
+      await ctx.comment({
+        main: sections.join("\\n"),
         inlineFindings,
       });
     },
@@ -184,8 +192,6 @@ function suggestionSummary(count: number): string {
   return count + " exact suggested " + noun + " passed validation.";
 }
 
-type FindingAnchor = Pick<ReviewFinding, "path" | "rangeId" | "side" | "startLine" | "endLine">;
-
 function isPublishableSuggestion(suggestion: FixSuggestion, manifest: DiffManifest): boolean {
   if (suggestion.suggestedFix.trim().length === 0) {
     return false;
@@ -206,24 +212,12 @@ function isPublishableSuggestion(suggestion: FixSuggestion, manifest: DiffManife
 }
 
 function commentableRangeForFinding(
-  finding: FindingAnchor,
+  finding: Pick<ReviewFinding, "rangeId">,
   manifest: DiffManifest,
 ): CommentableRange | undefined {
-  for (const file of manifest.files) {
-    const range = file.commentableRanges.find((candidate) => candidate.id === finding.rangeId);
-    if (!range) {
-      continue;
-    }
-    return finding.rangeId === range.id &&
-      finding.path === range.path &&
-      finding.side === range.side &&
-      finding.startLine <= finding.endLine &&
-      finding.startLine >= range.startLine &&
-      finding.endLine <= range.endLine
-      ? range
-      : undefined;
-  }
-  return undefined;
+  return manifest.files
+    .flatMap((file) => file.commentableRanges)
+    .find((range) => range.id === finding.rangeId);
 }
 
 function isPublishableSuggestedFixSelection(selection: {
@@ -561,13 +555,6 @@ function environmentAccessKeys(value: string): Set<string> {
 }
 
 function suggestionsTable(suggestions: FixSuggestion[]): string {
-  if (suggestions.length === 0) {
-    return [
-      "| Category | Title |",
-      "| --- | --- |",
-      "| - | No exact suggested fixes found. |",
-    ].join("\\n");
-  }
   return [
     "| Category | Title |",
     "| --- | --- |",

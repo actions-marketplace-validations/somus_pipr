@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import {
   renderResolvedFindingMarker,
@@ -23,6 +24,7 @@ import {
   runTestHostCommand,
   verifierPublicationClient,
   verifierRunIdFromReplyAction,
+  writePiExecutable,
   writeReviewCommentEvent,
   writeStillValidVerifierOutput,
 } from "./commands-fixtures.js";
@@ -240,10 +242,24 @@ describe("runHostRunCommand pull_request_review_comment dispatch", () => {
         workspace,
         "This still applies because the unsafe path remains.",
       );
-      await expectVerifierReplyPublished(workspace, publication, {
+      const result = await expectVerifierReplyPublished(workspace, publication, {
         githubClient: fakeGitHubClient(workspace, "write"),
         logSink: logs.logSink,
       });
+      expect(result.run).toMatchObject({
+        trigger: "verifier",
+        baseSha: workspace.baseSha,
+        headSha: workspace.headSha,
+        tasks: ["pipr-internal-verifier"],
+        models: ["deepseek-reasoner"],
+        agentRuns: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        usageStatus: "unavailable",
+      });
+      expect(result.run.id).toMatch(/^pipr-/);
+      expect(result.run.durationMs).toBeGreaterThanOrEqual(0);
       const output = logs.messages.join("\n");
       expect(output).toContain('"eventName":"pull_request_review_comment"');
       expect(output).toContain('"event":"parse event start"');
@@ -254,6 +270,65 @@ describe("runHostRunCommand pull_request_review_comment dispatch", () => {
         renderVerifierResponseMarker("fnd_existing", "reply-11:still-valid:fnd_existing"),
       );
       expect(currentGitHead(workspace.rootDir)).toBe(workspace.headSha);
+      const [executionId] = await readdir(path.join(workspace.rootDir, ".pipr-runs"));
+      if (!executionId) throw new Error("expected verifier run bundle");
+      const bundle = path.join(workspace.rootDir, ".pipr-runs", executionId);
+      expect(await Bun.file(path.join(bundle, "run.json")).json()).toMatchObject({
+        kind: "verifier",
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({ path: "artifacts/verifier-output.json" }),
+          expect.objectContaining({ path: "artifacts/diff-manifest.json" }),
+        ]),
+      });
+      expect(await Bun.file(path.join(bundle, "artifacts/verifier-output.json")).json()).toEqual({
+        errors: [],
+      });
+      expect(
+        await Bun.file(path.join(bundle, "artifacts/diff-manifest.json")).json(),
+      ).toMatchObject({ baseSha: workspace.baseSha, headSha: workspace.headSha });
+    } finally {
+      await removeWorkspace(workspace.rootDir);
+    }
+  });
+
+  it("includes cache usage and current diff coverage in verifier run summaries", async () => {
+    const workspace = await createCommandWorkspace({ checkoutBaseBeforeRun: true });
+    const publication = verifierPublicationClient(workspace);
+    try {
+      const output = JSON.stringify({
+        findings: [{ id: "fnd_existing", status: "still-valid", response: "Still applies." }],
+      });
+      await writePiExecutable(
+        workspace.piExecutable,
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            model: "verifier-model",
+            content: [{ type: "text", text: output }],
+            usage: {
+              input: 12,
+              output: 3,
+              cacheRead: 8,
+              cacheWrite: 2,
+              cost: { total: 0.004 },
+            },
+          },
+        }),
+      );
+
+      const result = await expectVerifierReplyPublished(workspace, publication, {
+        githubClient: fakeGitHubClient(workspace, "write"),
+      });
+      expect(result.run).toMatchObject({
+        cacheReadTokens: 8,
+        cacheWriteTokens: 2,
+        cacheUsageStatus: "complete",
+        diffContextCoverage: {
+          files: { total: expect.any(Number), covered: expect.any(Number) },
+          ranges: { total: expect.any(Number), covered: expect.any(Number) },
+        },
+      });
     } finally {
       await removeWorkspace(workspace.rootDir);
     }
@@ -274,6 +349,42 @@ describe("runHostRunCommand pull_request_review_comment dispatch", () => {
         "Still applies because [redacted secret].",
       );
       expect(publication.reviewReplies[0]?.body).not.toContain(detected);
+    } finally {
+      await removeWorkspace(workspace.rootDir);
+    }
+  });
+
+  it("redacts configured provider secrets from verifier run artifacts", async () => {
+    const detected = "custom-provider-secret";
+    const config = reviewConfigTs({ autoResolve: "any" }).replaceAll("DEEPSEEK_API_KEY", "FOO");
+    const workspace = await createCommandWorkspace({
+      baseConfigTs: config,
+      checkoutBaseBeforeRun: true,
+    });
+    const publication = verifierPublicationClient(workspace);
+    try {
+      await writeStillValidVerifierOutput(workspace, `Still applies because ${detected}.`);
+      await expectVerifierReplyPublished(workspace, publication, {
+        githubClient: fakeGitHubClient(workspace, "write"),
+        env: {
+          ...reviewCommentEnv(workspace.rootDir, path.join(workspace.rootDir, "event.json")),
+          FOO: detected,
+        },
+      });
+
+      const [executionId] = await readdir(path.join(workspace.rootDir, ".pipr-runs"));
+      if (!executionId) throw new Error("expected verifier run bundle");
+      const captured = await Bun.file(
+        path.join(
+          workspace.rootDir,
+          ".pipr-runs",
+          executionId,
+          "artifacts",
+          "output-001-initial.txt",
+        ),
+      ).text();
+      expect(captured).toContain("[redacted secret]");
+      expect(captured).not.toContain(detected);
     } finally {
       await removeWorkspace(workspace.rootDir);
     }

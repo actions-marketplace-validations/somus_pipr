@@ -1,0 +1,82 @@
+---
+title: "Gitea, Forgejo, and Codeberg"
+description: "Run Pipr reviews and commands on Gitea-compatible code hosts."
+---
+
+Gitea, Forgejo, and Codeberg share one API family. Run automatic reviews with Actions, or use a trusted webhook worker for dedicated credentials and command events.
+
+## Choose the host
+
+Use the identifier and credentials for your service:
+
+| Service | Host | Workflow | Webhook token |
+| --- | --- | --- | --- |
+| Gitea | `gitea` | `.gitea/workflows/pipr.yml` | `GITEA_TOKEN` |
+| Forgejo | `forgejo` | `.forgejo/workflows/pipr.yml` | `FORGEJO_TOKEN` |
+| Codeberg | `codeberg` | `.forgejo/workflows/pipr.yml` | `CODEBERG_TOKEN` |
+
+Codeberg Actions exposes `FORGEJO_TOKEN` to workflows.
+
+## Run with Actions
+
+Generate the matching workflow:
+
+```bash
+pipr init --adapters gitea
+pipr init --adapters forgejo
+pipr init --adapters codeberg
+```
+
+The workflow requires a container-isolated runner with the `docker` label and a full checkout. Add the model-provider secret named by `.pipr/config.ts`; the default config expects `DEEPSEEK_API_KEY`.
+
+The workflow uses the host's automatic token for repository API calls. Confirm the instance's fork and secret policy before reviewing untrusted contributions.
+
+Commit `.pipr` and the generated workflow, then open a pull request to verify the main comment, inline findings, and task statuses.
+
+## Run with trusted webhooks
+
+Export the server URL, repository-scoped bot token, webhook secret, and model key. For example:
+
+```bash
+export FORGEJO_SERVER_URL="$FORGEJO_INSTANCE_URL"
+export FORGEJO_TOKEN="..."
+export PIPR_WEBHOOK_SECRET="..."
+export DEEPSEEK_API_KEY="..."
+
+pipr webhook serve \
+  --host forgejo \
+  --repository owner/repository \
+  --workspace /srv/pipr/repository \
+  --database /var/lib/pipr/webhooks.sqlite \
+  --hostname 127.0.0.1 \
+  --port 8787
+```
+
+Replace the host and environment names for Gitea or Codeberg. Codeberg defaults to `codeberg.org/api/v1`.
+
+The bot token must read repository and pull-request metadata, inspect collaborator permissions, create comments and statuses, and create review replies when the server supports them.
+
+Create a repository webhook with the same secret and enable:
+
+- Pull request
+- Issue comment
+
+Place the listener behind an HTTPS reverse proxy and persist the SQLite directory. Run one worker per dedicated checkout.
+
+## Supported behavior
+
+All three hosts support:
+
+- pull request and command-comment events
+- trusted config and exact-head checkout
+- main comments, command responses, and task statuses
+- single-line inline comments on added or deleted lines
+- stale-head checks and safe reruns
+
+Verifier synchronization replies require a compatible review-comment reply API. User-reply verification and native thread resolution are unavailable. Multiline anchors and native suggestion blocks are also unavailable; Pipr anchors to the final selected line and renders replacement code as fenced Markdown.
+
+## Next steps
+
+- Use [Deploy the webhook runner with Docker](/docs/guide/webhook-docker) for persistent state and health checks.
+- Read [Trust and security](/docs/concepts/trust-security) before enabling untrusted pull requests.
+- Use [Configuration](/docs/guide/configuration) to change models and publication limits.

@@ -1,12 +1,20 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import type { CodeHostWebhookProtocol } from "../webhook.js";
 import { parseWebhookJson } from "../webhook-shared.js";
+import type { CodeHostWebhookProtocol } from "../webhook-types.js";
 import { createBitbucketClient } from "./client.js";
 
 const eventSchema = z.looseObject({
   repository: z.looseObject({ uuid: z.string().min(1), full_name: z.string().min(1) }),
   pullrequest: z.looseObject({ id: z.number().int().positive() }),
+});
+const dataCenterEventSchema = z.looseObject({
+  repository: z.looseObject({
+    id: z.union([z.number(), z.string()]).transform(String),
+    slug: z.string().min(1),
+    project: z.looseObject({ key: z.string().min(1) }),
+  }),
+  pullRequest: z.looseObject({ id: z.number().int().positive() }),
 });
 
 export function createBitbucketWebhookProtocol(): CodeHostWebhookProtocol {
@@ -25,23 +33,44 @@ export function createBitbucketWebhookProtocol(): CodeHostWebhookProtocol {
       return verifyBitbucketSignature(payload, headers.get("X-Hub-Signature"), secret);
     },
     matchesExpectedRepository(payload, expected) {
-      const event = eventSchema.safeParse(parseWebhookJson(payload));
+      if (
+        typeof expected !== "object" ||
+        expected === null ||
+        !("uuid" in expected) ||
+        !("fullName" in expected)
+      ) {
+        return false;
+      }
+      const parsed = parseWebhookJson(payload);
+      const cloud = eventSchema.safeParse(parsed);
+      if (cloud.success) {
+        return (
+          cloud.data.repository.uuid === expected.uuid &&
+          cloud.data.repository.full_name === expected.fullName
+        );
+      }
+      const dataCenter = dataCenterEventSchema.safeParse(parsed);
       return (
-        event.success &&
-        typeof expected === "object" &&
-        expected !== null &&
-        "uuid" in expected &&
-        "fullName" in expected &&
-        event.data.repository.uuid === expected.uuid &&
-        event.data.repository.full_name === expected.fullName
+        dataCenter.success &&
+        dataCenter.data.repository.id === expected.uuid &&
+        `${dataCenter.data.repository.project.key}/${dataCenter.data.repository.slug}` ===
+          expected.fullName
       );
     },
     deliveryId(headers, payload) {
       const request = headers.get("X-Request-UUID");
       const hook = headers.get("X-Hook-UUID");
-      if (!request || !hook) return undefined;
-      const digest = createHmac("sha256", hook).update(payload).digest("hex").slice(0, 16);
-      return `bitbucket:${hook}:${request}:${digest}`;
+      if (request && hook) {
+        const digest = createHmac("sha256", hook).update(payload).digest("hex").slice(0, 16);
+        return `bitbucket:${hook}:${request}:${digest}`;
+      }
+      const dataCenterRequest = headers.get("X-Request-Id");
+      if (!dataCenterRequest) return undefined;
+      const digest = createHmac("sha256", dataCenterRequest)
+        .update(payload)
+        .digest("hex")
+        .slice(0, 16);
+      return `bitbucket:${dataCenterRequest}:${digest}`;
     },
     eventName(headers) {
       return headers.get("X-Event-Key") ?? undefined;

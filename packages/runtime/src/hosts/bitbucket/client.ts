@@ -1,75 +1,10 @@
 import { z } from "zod";
 import { createCodeHostHttpClient } from "../http.js";
-import type { CodeHostStatusState, LoadedChangeRequest, RepositoryPermission } from "../types.js";
+import type { CodeHostStatusState } from "../types.js";
+import { loadedBitbucketChange } from "./change.js";
+import { createBitbucketDataCenterClient } from "./data-center-client.js";
+import { type BitbucketClient, commentSchema, pullRequestSchema, userSchema } from "./models.js";
 import { bitbucketRepositorySchema } from "./schema.js";
-
-const userSchema = z.looseObject({
-  uuid: z.string().optional(),
-  nickname: z.string().optional(),
-  display_name: z.string().optional(),
-});
-const endpointSchema = z.looseObject({
-  branch: z.looseObject({ name: z.string().min(1) }),
-  commit: z.looseObject({ hash: z.string().min(1) }),
-  repository: bitbucketRepositorySchema,
-});
-const pullRequestSchema = z.looseObject({
-  id: z.number().int().positive(),
-  draft: z.boolean().optional(),
-  title: z.string(),
-  description: z.string().default(""),
-  author: userSchema.optional(),
-  source: endpointSchema,
-  destination: endpointSchema,
-  links: z.looseObject({ html: z.looseObject({ href: z.string().url() }) }),
-});
-const inlineSchema = z.looseObject({
-  path: z.string().optional(),
-  from: z.number().int().nullable().optional(),
-  to: z.number().int().nullable().optional(),
-  start_from: z.number().int().nullable().optional(),
-  start_to: z.number().int().nullable().optional(),
-});
-const commentSchema = z.looseObject({
-  id: z.union([z.number(), z.string()]).transform(String),
-  content: z.looseObject({ raw: z.string().default("") }),
-  user: userSchema.optional(),
-  parent: z.looseObject({ id: z.union([z.number(), z.string()]).transform(String) }).optional(),
-  inline: inlineSchema.optional(),
-  deleted: z.boolean().optional(),
-  resolution: z.looseObject({}).optional(),
-});
-
-export type BitbucketPullRequest = z.infer<typeof pullRequestSchema>;
-export type BitbucketComment = z.infer<typeof commentSchema>;
-
-export type BitbucketClient = {
-  workspace: string;
-  repository: string;
-  currentUser(): Promise<{ uuid?: string; nickname?: string; displayName?: string }>;
-  getRepository(): Promise<{ uuid: string; slug: string; fullName: string; url: string }>;
-  getRepositoryPermission(actor: string, repositoryUuid: string): Promise<RepositoryPermission>;
-  getPullRequest(changeNumber: number): Promise<BitbucketPullRequest>;
-  loadChange(options: {
-    workspace: string;
-    repository: string;
-    changeNumber: number;
-  }): Promise<LoadedChangeRequest>;
-  listComments(changeNumber: number): Promise<BitbucketComment[]>;
-  createComment(changeNumber: number, body: Record<string, unknown>): Promise<BitbucketComment>;
-  updateComment(
-    changeNumber: number,
-    commentId: string,
-    content: string,
-  ): Promise<BitbucketComment>;
-  replyToComment(
-    changeNumber: number,
-    commentId: string,
-    content: string,
-  ): Promise<BitbucketComment>;
-  resolveComment(changeNumber: number, commentId: string): Promise<void>;
-  setStatus(sha: string, key: string, body: Record<string, unknown>): Promise<string>;
-};
 
 export function createBitbucketClient(
   env: NodeJS.ProcessEnv = process.env,
@@ -78,6 +13,7 @@ export function createBitbucketClient(
     init?: RequestInit,
   ) => Promise<Response> = globalThis.fetch,
 ): BitbucketClient {
+  if (env.BITBUCKET_BASE_URL) return createBitbucketDataCenterClient(env, fetch);
   const workspace = env.BITBUCKET_WORKSPACE;
   const repository = env.BITBUCKET_REPO_SLUG;
   const token = env.BITBUCKET_API_TOKEN;
@@ -99,6 +35,7 @@ export function createBitbucketClient(
   });
   const prPath = (id: number) => `pullrequests/${id}`;
   return {
+    deployment: "cloud",
     workspace,
     repository,
     async currentUser() {
@@ -145,37 +82,7 @@ export function createBitbucketClient(
       if (options.workspace !== workspace || options.repository !== repository)
         throw new Error("Bitbucket client coordinates do not match the requested repository");
       const pullRequest = await this.getPullRequest(options.changeNumber);
-      return {
-        repository: {
-          slug: pullRequest.destination.repository.full_name,
-          url: pullRequest.destination.repository.links.html.href,
-        },
-        coordinates: {
-          provider: "bitbucket",
-          workspace,
-          repository,
-          repositoryUuid: pullRequest.destination.repository.uuid,
-        },
-        change: {
-          number: pullRequest.id,
-          isDraft: pullRequest.draft,
-          title: pullRequest.title,
-          description: pullRequest.description,
-          url: pullRequest.links.html.href,
-          author: pullRequest.author?.nickname ? { login: pullRequest.author.nickname } : undefined,
-          base: {
-            sha: pullRequest.destination.commit.hash,
-            ref: pullRequest.destination.branch.name,
-            url: pullRequest.destination.repository.links.html.href,
-          },
-          head: {
-            sha: pullRequest.source.commit.hash,
-            ref: pullRequest.source.branch.name,
-            url: pullRequest.source.repository.links.html.href,
-          },
-          isFork: pullRequest.source.repository.uuid !== pullRequest.destination.repository.uuid,
-        },
-      };
+      return loadedBitbucketChange(pullRequest, workspace, repository);
     },
     async listComments(id) {
       return (

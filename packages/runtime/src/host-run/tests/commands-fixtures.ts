@@ -6,20 +6,17 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runGit as runGitCommand } from "../../diff/git.js";
 import { createGitHubHostAdapter } from "../../hosts/github/adapter.js";
-import type { GitHubCommandClient } from "../../hosts/github/command.js";
-import type { GitHubPublicationClient } from "../../hosts/github/publication.js";
+import type { GitHubCommandClient, GitHubPublicationClient } from "../../hosts/github/client.js";
 import type {
   CodeHostAdapter,
   CodeHostCapabilities,
   RepositoryPermission,
 } from "../../hosts/types.js";
 import { renderInlineFindingMarker } from "../../review/prior-state.js";
+import type { RuntimeLogSink } from "../../shared/logging.js";
 import type { SecretRedactor } from "../../shared/secret-redaction.js";
 import { writeAggregateReviewablePatchOver16MiB } from "../../tests/helpers/aggregate-reviewable-patch.js";
-import {
-  type RuntimeLogSink,
-  runHostRunCommandWithDependencies as runHostRun,
-} from "../commands.js";
+import { runHostRunCommandWithDependencies as runHostRun } from "../commands-hosted.js";
 
 export type TestHostRunOptions = Omit<Parameters<typeof runHostRun>[0], "hostAdapter"> & {
   hostAdapter?: CodeHostAdapter;
@@ -60,6 +57,20 @@ export async function writeFailingPiExecutable(piExecutable: string): Promise<vo
       "#!/bin/sh",
       'printf "%s\\n" "$DEEPSEEK_API_KEY" >&2',
       'printf "%s\\n" "model exploded" >&2',
+      "exit 42",
+    ].join("\n"),
+  );
+  await chmod(piExecutable, 0o755);
+}
+
+export async function writeProviderAuthenticationFailurePiExecutable(
+  piExecutable: string,
+): Promise<void> {
+  await Bun.write(
+    piExecutable,
+    [
+      "#!/bin/sh",
+      'printf "%s\\n" "API Error 401: invalid API key private-provider-detail" >&2',
       "exit 42",
     ].join("\n"),
   );
@@ -134,9 +145,12 @@ export async function writePiExecutable(piExecutable: string, stdout: string): P
 }
 
 function piExecutableScript(stdout: string): string {
-  return ["#!/bin/sh", 'touch "$(dirname "$0")/pi-called"', `printf '%s\\n' '${stdout}'`].join(
-    "\n",
-  );
+  return [
+    "#!/bin/sh",
+    'touch "$(dirname "$0")/pi-called"',
+    'printf "%s\\n" "$PI_CODING_AGENT_DIR" > "$(dirname "$0")/pi-agent-dir"',
+    `printf '%s\\n' '${stdout}'`,
+  ].join("\n");
 }
 
 export async function runIssueCommentCommand(
@@ -198,6 +212,7 @@ export async function runReviewCommentAction(
     githubPublicationClient: GitHubPublicationClient;
     logSink?: RuntimeLogSink;
     secretRedactor?: SecretRedactor;
+    env?: NodeJS.ProcessEnv;
   },
 ) {
   const eventPath = path.join(workspace.rootDir, "event.json");
@@ -206,7 +221,7 @@ export async function runReviewCommentAction(
     configDir: ".pipr",
     eventPath,
     dryRun: options.dryRun ?? false,
-    env: reviewCommentEnv(workspace.rootDir, eventPath),
+    env: options.env ?? reviewCommentEnv(workspace.rootDir, eventPath),
     githubClient: options.githubClient,
     githubPublicationClient: options.githubPublicationClient,
     piExecutable: workspace.piExecutable,
@@ -291,8 +306,9 @@ export async function expectVerifierReplyPublished(
     event?: Parameters<typeof writeReviewCommentEvent>[1];
     logSink?: RuntimeLogSink;
     secretRedactor?: SecretRedactor;
+    env?: NodeJS.ProcessEnv;
   },
-): Promise<void> {
+) {
   const eventPath = path.join(workspace.rootDir, "event.json");
   await writeReviewCommentEvent(eventPath, options.event);
   const result = await runReviewCommentAction(workspace, {
@@ -300,14 +316,17 @@ export async function expectVerifierReplyPublished(
     githubPublicationClient: publication,
     logSink: options.logSink,
     secretRedactor: options.secretRedactor,
+    env: options.env,
   });
   expect(result).toMatchObject({
     kind: "verifier",
     errors: [],
     event: { coordinates: { provider: "github", owner: "local", repository: "pipr" } },
   });
+  if (result.kind !== "verifier") throw new Error("expected verifier result");
   expect(publication.reviewReplies).toHaveLength(1);
   await expectPiCalled(workspace);
+  return result;
 }
 
 export async function verifierRunIdFromReplyAction(
@@ -355,6 +374,8 @@ export function reviewConfigTs(
     parseSideEffect?: boolean;
     checks?: boolean;
     autoResolve?: false | "userRepliesDisabled" | "any";
+    subscriptionModel?: boolean;
+    showProgress?: boolean;
   } = {},
 ): string {
   const template = "$";
@@ -371,10 +392,14 @@ export function reviewConfigTs(
     "",
     "export default definePipr((pipr) => {",
     "  const model = pipr.model({",
-    '    provider: "deepseek",',
-    '    model: "deepseek-reasoner",',
-    '    apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),',
-    '    options: { thinking: "high" },',
+    ...(options.subscriptionModel
+      ? ['    provider: "openai-codex",', '    model: "gpt-5.5",']
+      : [
+          '    provider: "deepseek",',
+          '    model: "deepseek-reasoner",',
+          '    apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),',
+        ]),
+    '    thinking: "high",',
     "  });",
     "  const reviewer = pipr.agent({",
     '    name: "reviewer",',
@@ -394,6 +419,9 @@ export function reviewConfigTs(
     "  });",
     options.event === false ? "" : '  pipr.on.changeRequest({ actions: ["opened"], task });',
     options.checks ? "  pipr.config({ checks: { aggregate: { enabled: true } } });" : "",
+    options.showProgress === false
+      ? "  pipr.config({ publication: { showProgress: false } });"
+      : "",
     autoResolveConfig,
     options.command === false
       ? ""
@@ -569,7 +597,7 @@ export function explicitModelIdConfigTs(): string {
     '    provider: "deepseek",',
     '    model: "deepseek-reasoner",',
     '    apiKey: pipr.secret({ name: "FAST_DEEPSEEK_API_KEY" }),',
-    '    options: { thinking: "high" },',
+    '    thinking: "high",',
     "  });",
     "  const reviewer = pipr.agent({",
     '    name: "reviewer",',
@@ -738,11 +766,20 @@ export function fakeGitHubPublicationClient(
     async listIssueComments() {
       return issueComments;
     },
-    async createIssueComment() {
-      return { id: 1 };
+    async createIssueComment(options) {
+      const comment = {
+        id: issueComments.length + 1,
+        body: options.body,
+        authorLogin: "github-actions[bot]",
+      };
+      issueComments.push(comment);
+      return { id: comment.id };
     },
-    async updateIssueComment() {
-      return { id: 1 };
+    async updateIssueComment(options) {
+      const comment = issueComments.find((item) => item.id === options.commentId);
+      if (!comment) throw new Error("issue comment not found");
+      comment.body = options.body;
+      return { id: comment.id };
     },
     async listReviewComments() {
       return [];
@@ -789,10 +826,13 @@ export function recordingCommandPublicationClient(
   const client = fakeGitHubPublicationClient(workspace, issueComments);
   client.createIssueComment = async (options) => {
     writes.created.push(options.body);
+    issueComments.push({ id: 10, body: options.body, authorLogin: "github-actions[bot]" });
     return { id: 10 };
   };
   client.updateIssueComment = async (options) => {
     writes.updated.push(options.body);
+    const existing = issueComments.find((comment) => comment.id === options.commentId);
+    if (existing) existing.body = options.body;
     return { id: options.commentId };
   };
   return { client, writes };
@@ -846,7 +886,14 @@ export function verifierPublicationClient(
       return reviewComments;
     },
     async listReviewThreads() {
-      return [{ id: "thread-1", isResolved: false, commentIds: [parentCommentId, replyCommentId] }];
+      return [
+        {
+          id: "thread-1",
+          isResolved: false,
+          viewerCanResolve: true,
+          commentIds: [parentCommentId, replyCommentId],
+        },
+      ];
     },
     async createReviewCommentReply(options: { commentId: number; body: string }) {
       reviewReplies.push(options);
@@ -973,6 +1020,9 @@ export function pullRequestEnv(rootDir: string, eventPath: string): NodeJS.Proce
     FAST_DEEPSEEK_API_KEY: "provider-key",
     GITHUB_EVENT_NAME: "pull_request",
     GITHUB_EVENT_PATH: eventPath,
+    GITHUB_REPOSITORY: "local/pipr",
+    GITHUB_RUN_ID: "123",
+    GITHUB_SERVER_URL: "https://github.com",
     GITHUB_WORKSPACE: rootDir,
   };
 }

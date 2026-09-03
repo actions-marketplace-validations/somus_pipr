@@ -1,9 +1,9 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { frontmatter } from "fumadocs-core/content/md/frontmatter";
 import { supportedOfficialInitAdapters } from "../../../packages/runtime/src/config/init.js";
 import { supportedOfficialInitRecipes } from "../../../packages/runtime/src/config/recipes.js";
-import { getLegacyDocRedirect } from "../src/lib/docs-routes.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -25,8 +25,33 @@ for (const file of docFiles) {
 }
 
 for (const [route, page] of pages) {
+  checkDescription(page);
   checkInternalLinks(route, page);
   await checkImageAssets(page);
+}
+
+function checkDescription(page: { file: string; source: string }): void {
+  const description = frontmatterDescription(page.source);
+  if (!isNonEmptyString(description)) {
+    errors.push(`${relative(page.file)}: frontmatter description must be non-empty plain text`);
+    return;
+  }
+  if (hasRichDescriptionMarkup(description)) {
+    errors.push(`${relative(page.file)}: frontmatter description must be plain text`);
+  }
+}
+
+function frontmatterDescription(source: string): unknown {
+  const data = frontmatter(source).data;
+  return isRecord(data) ? data.description : undefined;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function hasRichDescriptionMarkup(value: string): boolean {
+  return value.includes("`") || /\[[^\]]+\]\([^)]+\)/.test(value);
 }
 
 checkOfficialCoverage();
@@ -113,15 +138,6 @@ function checkInternalLink(
 ): void {
   const [rawPath, anchor] = link.split("#", 2);
   const route = normalizeDocsRoute(rawPath);
-  const slugs = route
-    .replace(/^\/docs\/?/, "")
-    .split("/")
-    .filter(hasText);
-  const legacy = getLegacyDocRedirect(slugs);
-  if (legacy) {
-    errors.push(`${relative(page.file)}: stale docs link ${link}; use ${legacy}`);
-    return;
-  }
   const target = pages.get(route);
   if (!target) {
     errors.push(`${relative(page.file)}: broken docs route ${link} from ${sourceRoute}`);
@@ -133,10 +149,6 @@ function checkInternalLink(
 function normalizeDocsRoute(rawPath: string): string {
   const route = rawPath.replace(/\.md$/, "").replace(/\/$/, "");
   return route.length === 0 ? "/docs" : route;
-}
-
-function hasText(value: string): boolean {
-  return value.length > 0;
 }
 
 function checkAnchor(anchors: Set<string>, anchor: string | undefined, file: string, link: string) {
@@ -193,20 +205,49 @@ function checkRecipeCoverage(recipe: string): void {
 }
 
 function checkAdapterCoverage(adapter: string): void {
-  const route = adapterGuideRoute(adapter);
-  const page = pages.get(route);
+  const coverage = adapterGuideCoverage(adapter);
+  const page = pages.get(coverage.route);
   if (!page) {
-    errors.push(`adapters: missing provider guide ${route}`);
+    errors.push(`adapters: missing provider guide ${coverage.route}`);
     return;
   }
-  for (const view of ["review", "inline"]) {
+  checkAdapterText(page, coverage.requiredText);
+  for (const view of coverage.imageViews) {
     checkProviderImage(page, adapter, view);
   }
 }
 
-function adapterGuideRoute(adapter: string): string {
-  if (adapter === "github") return "/docs/guide/github-action";
-  return `/docs/guide/${adapter}`;
+function adapterGuideCoverage(adapter: string): {
+  route: string;
+  requiredText: string[];
+  imageViews: string[];
+} {
+  const familyRoute = "/docs/guide/gitea-forgejo-codeberg";
+  const special: Record<string, { route: string; requiredText: string[]; imageViews: string[] }> = {
+    github: {
+      route: "/docs/guide/github-action",
+      requiredText: [],
+      imageViews: ["review", "inline"],
+    },
+    gitea: { route: familyRoute, requiredText: ["`gitea`"], imageViews: [] },
+    forgejo: { route: familyRoute, requiredText: ["`forgejo`"], imageViews: [] },
+    codeberg: { route: familyRoute, requiredText: ["`codeberg`"], imageViews: [] },
+  };
+  return (
+    special[adapter] ?? {
+      route: `/docs/guide/${adapter}`,
+      requiredText: [],
+      imageViews: ["review", "inline"],
+    }
+  );
+}
+
+function checkAdapterText(page: { file: string; source: string }, requiredText: string[]): void {
+  for (const text of requiredText) {
+    if (!page.source.includes(text)) {
+      errors.push(`${relative(page.file)}: missing official adapter id ${text.slice(1, -1)}`);
+    }
+  }
 }
 
 function checkProviderImage(
@@ -295,4 +336,8 @@ function skipExternalUrl(url: string): boolean {
 
 function relative(file: string): string {
   return path.relative(repoRoot, file).split(path.sep).join("/");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

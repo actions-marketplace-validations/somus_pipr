@@ -1,6 +1,6 @@
 import { GithubIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { createFileRoute, Link, notFound, redirect } from "@tanstack/react-router";
+import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { staticFunctionMiddleware } from "@tanstack/start-static-server-functions";
 import browserCollections from "collections/browser";
@@ -16,17 +16,13 @@ import {
 } from "fumadocs-ui/layouts/docs/page";
 import { Suspense } from "react";
 import { getMDXComponents } from "@/components/mdx";
-import { getLegacyDocRedirect } from "@/lib/docs-routes";
 import { baseOptions } from "@/lib/layout.shared";
-import { appName, gitConfig } from "@/lib/shared";
+import { appName, gitConfig, siteUrl } from "@/lib/shared";
 import { getPageImage, slugsToMarkdownPath, source } from "@/lib/source";
 
 export const Route = createFileRoute("/docs/$")({
   loader: async ({ params }) => {
     const slugs = params._splat?.split("/") ?? [];
-    const redirectTo = getLegacyDocRedirect(slugs);
-    if (redirectTo) throw redirect({ href: redirectTo, statusCode: 308 });
-
     const data = await loader({ data: slugs });
     await clientLoader.preload(data.path);
     return data;
@@ -35,6 +31,7 @@ export const Route = createFileRoute("/docs/$")({
     if (!loaderData) return {};
 
     return {
+      links: [{ rel: "canonical", href: loaderData.canonicalUrl }],
       meta: [
         {
           title: `${loaderData.title} | ${appName} Docs`,
@@ -50,6 +47,10 @@ export const Route = createFileRoute("/docs/$")({
         {
           property: "og:description",
           content: loaderData.description,
+        },
+        {
+          property: "og:url",
+          content: loaderData.canonicalUrl,
         },
         {
           property: "og:image",
@@ -94,7 +95,8 @@ const loader = createServerFn({
       path: page.path,
       title: page.data.title,
       description: page.data.description,
-      imageUrl: getPageImage(page).url,
+      canonicalUrl: siteUrl(page.url),
+      imageUrl: siteUrl(getPageImage(page).url),
       markdownUrl: slugsToMarkdownPath(page.slugs).url,
       pageTree: await source.serializePageTree(source.getPageTree()),
     };

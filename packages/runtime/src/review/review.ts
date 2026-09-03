@@ -1,3 +1,4 @@
+import type { ValidatedReviewFindings } from "@usepipr/sdk";
 import { diffFileMatchesPathFilter, pathMatchesFilter } from "../diff/path-filter.js";
 import { createDiffRangeIndex } from "../diff/ranges.js";
 import type {
@@ -30,6 +31,19 @@ export function validateReviewResult(
   manifest: DiffManifest,
   options: ValidateReviewOptions,
 ): ValidatedReview {
+  const findings = validateReviewFindings(review.inlineFindings, manifest, options);
+  return parseValidatedReview({
+    review,
+    validFindings: findings.validFindings,
+    droppedFindings: findings.droppedFindings,
+  });
+}
+
+export function validateReviewFindings<T extends ReviewFinding>(
+  findings: readonly T[],
+  manifest: DiffManifest,
+  options: ValidateReviewOptions,
+): ValidatedReviewFindings<T> {
   if (options.expectedHeadSha && manifest.headSha !== options.expectedHeadSha) {
     throw new Error(
       `Diff Manifest head SHA '${manifest.headSha}' does not match expected head SHA '${options.expectedHeadSha}'`,
@@ -37,37 +51,64 @@ export function validateReviewResult(
   }
   const ranges = createDiffRangeIndex(manifest);
   const seenFingerprints = new Set<string>();
+  const validFindings: ValidatedReviewFindings<T>["validFindings"][number][] = [];
+  const droppedFindings: ValidatedReviewFindings<T>["droppedFindings"][number][] = [];
 
-  const validFindings: ReviewFinding[] = [];
-  const droppedFindings: ValidatedReview["droppedFindings"] = [];
-
-  for (const [index, finding] of review.inlineFindings.entries()) {
-    const fingerprint = findingFingerprint(finding);
-    const rangeMatch = ranges.findRange(finding.rangeId);
+  for (const [index, finding] of findings.entries()) {
+    const suppliedRange = ranges.findRange(finding.rangeId)?.range;
+    const validatedFinding = findingRangeMismatchReason(finding, suppliedRange)
+      ? canonicalizeFindingRangeId(finding, manifest)
+      : findingWithRangeId(finding, finding.rangeId);
+    const fingerprint = findingFingerprint(validatedFinding);
+    const rangeMatch = ranges.findRange(validatedFinding.rangeId);
     const reason = findingDropReason({
-      finding,
+      finding: validatedFinding,
       fingerprint,
-      pathScope: options.pathScopeForFinding?.(finding, index),
+      pathScope: options.pathScopeForFinding?.(validatedFinding, index),
       file: rangeMatch?.file,
       range: rangeMatch?.range,
-      excludedReason: ranges.excludedReason(finding.path),
+      excludedReason: ranges.excludedReason(validatedFinding.path),
       seenFingerprints,
     });
 
     if (reason) {
-      droppedFindings.push({ finding, reason });
+      droppedFindings.push({ finding: validatedFinding, reason });
       continue;
     }
 
     seenFingerprints.add(fingerprint);
-    validFindings.push(finding);
+    validFindings.push(validatedFinding);
   }
 
-  return parseValidatedReview({
-    review,
-    validFindings,
-    droppedFindings,
-  });
+  return { validFindings, droppedFindings };
+}
+
+function canonicalizeFindingRangeId<T extends ReviewFinding>(
+  finding: T,
+  manifest: DiffManifest,
+): ValidatedReviewFindings<T>["validFindings"][number] {
+  if (finding.startLine > finding.endLine) {
+    return findingWithRangeId(finding, finding.rangeId);
+  }
+
+  const matchingRanges = manifest.files.flatMap((file) =>
+    file.commentableRanges.filter(
+      (range) =>
+        range.path === finding.path &&
+        range.side === finding.side &&
+        finding.startLine >= range.startLine &&
+        finding.endLine <= range.endLine,
+    ),
+  );
+  const matchingRange = matchingRanges.length === 1 ? matchingRanges[0] : undefined;
+  return findingWithRangeId(finding, matchingRange?.id ?? finding.rangeId);
+}
+
+function findingWithRangeId<T extends ReviewFinding>(
+  finding: T,
+  rangeId: string,
+): ValidatedReviewFindings<T>["validFindings"][number] {
+  return { ...finding, rangeId } as ValidatedReviewFindings<T>["validFindings"][number];
 }
 
 type FindingValidationContext = {

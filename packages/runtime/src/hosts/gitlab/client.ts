@@ -38,7 +38,8 @@ const positionSchema = z.looseObject({
         old_line: z.number().int().positive().nullish(),
       }),
     })
-    .optional(),
+    .nullish()
+    .transform((value) => value ?? undefined),
 });
 const discussionNoteSchema = noteSchema.extend({
   resolvable: z.boolean().optional(),
@@ -162,7 +163,7 @@ export function createGitLabClient(
     ? { "PRIVATE-TOKEN": token }
     : { "JOB-TOKEN": token };
   const clientOptions: CodeHostHttpClientOptions = {
-    baseUrl: `${(env.CI_API_V4_URL ?? "https://gitlab.com/api/v4").replace(/\/$/, "")}/`,
+    baseUrl: `${(env.CI_API_V4_URL || env.GITLAB_API_URL || "https://gitlab.com/api/v4").replace(/\/$/, "")}/`,
     headers,
     fetch,
     sleep: async (milliseconds: number) => void (await sleep(milliseconds)),

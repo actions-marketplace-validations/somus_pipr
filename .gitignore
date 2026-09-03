@@ -1,8 +1,10 @@
 node_modules
+.pipr-runs
 dist
 coverage
 .turbo
 .fallow
+.amp/portals/
 packages/evals/evalite-export
 apps/docs/.source
 apps/docs/.cache

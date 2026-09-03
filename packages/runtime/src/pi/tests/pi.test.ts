@@ -2,7 +2,9 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { chmod, lstat, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { reviewTestManifest } from "../../tests/helpers/review-test-manifest.js";
 import type { DiffManifest } from "../../types.js";
+import { buildPiArgs } from "../cli-args.js";
 import {
   parsePiProviderInvocation,
   parsePiProviderProfile,
@@ -13,14 +15,13 @@ import {
 } from "../contract.js";
 import { toPiProviderInvocation } from "../provider.js";
 import {
-  buildPiArgs,
   createReadOnlyWorkspace,
   createScopedPiRunner,
-  type PiRunOptions,
   runPi,
   withPiRunWorkspace,
 } from "../runner.js";
 import { piRuntimeReadToolNames } from "../runtime-tools.js";
+import type { PiRunOptions } from "../types.js";
 
 describe("Pi contract", () => {
   it("tracks the Pi CLI contract pipr depends on", () => {
@@ -83,7 +84,6 @@ describe("Pi contract", () => {
       parsePiProviderInvocation({
         provider: "deepseek",
         model: "deepseek-v4-pro",
-        apiKeyEnv: "DEEPSEEK_API_KEY",
         thinking: "high",
         tools: ["read", "grep", "find", "ls"],
       }),
@@ -93,7 +93,6 @@ describe("Pi contract", () => {
       parsePiProviderInvocation({
         provider: "deepseek",
         model: "deepseek-v4-pro",
-        apiKeyEnv: "DEEPSEEK_API_KEY",
         thinking: "high",
         tools: ["read", "bash", "grep", "find", "ls"],
       }),
@@ -280,6 +279,26 @@ describe("buildPiArgs", () => {
     }
   });
 
+  it("excludes captured run bundles from the read-only workspace copy", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    let copy: string | undefined;
+    try {
+      await Bun.write(path.join(workspace, "source.ts"), "export const value = 1;\n");
+      await Bun.write(path.join(workspace, ".pipr-runs", "previous", "run.json"), "{}\n");
+
+      copy = await createReadOnlyWorkspace(workspace);
+
+      await expect(lstat(path.join(copy, ".pipr-runs"))).rejects.toThrow();
+      await expect(lstat(path.join(copy, "source.ts"))).resolves.toBeDefined();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+      if (copy) {
+        await chmodTree(copy, 0o755);
+        await rm(copy, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("reuses a prepared workspace while isolating attempt state", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
     const piExecutable = path.join(workspace, "fake-pi.sh");
@@ -334,6 +353,7 @@ describe("buildPiArgs", () => {
 
   it("does not leak unrelated parent env vars into Pi", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piAgentDir = await mkdtemp(path.join(os.tmpdir(), "pipr-agent-"));
     const piExecutable = path.join(workspace, "fake-pi.sh");
     const previousProviderKey = process.env.DEEPSEEK_API_KEY;
     const previousSecret = process.env.SECRET_SHOULD_NOT_LEAK;
@@ -346,6 +366,7 @@ describe("buildPiArgs", () => {
       const result = await runPi({
         workspace,
         piExecutable,
+        piAgentDir,
         prompt: "Review this diff.",
         provider: {
           id: "backup",
@@ -361,6 +382,7 @@ describe("buildPiArgs", () => {
       expect(result.stdout).toContain("DEEPSEEK_API_KEY=provider-key");
       expect(result.stdout).toContain("HOME=");
       expect(result.stdout).toContain("PI_CODING_AGENT_DIR=");
+      expect(envLine(result.stdout, "PI_CODING_AGENT_DIR")).not.toBe(piAgentDir);
       expect(result.stdout).toContain("PI_CODING_AGENT_SESSION_DIR=");
       expect(result.stdout).toContain("PIPR_PROVIDER_ID=backup");
       expect(result.stdout).not.toContain(`HOME=${hostHome}`);
@@ -372,6 +394,96 @@ describe("buildPiArgs", () => {
     } finally {
       restoreEnv("DEEPSEEK_API_KEY", previousProviderKey);
       restoreEnv("SECRET_SHOULD_NOT_LEAK", previousSecret);
+      await rm(workspace, { recursive: true, force: true });
+      await rm(piAgentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the supplied Pi agent directory for a model without an API key", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piAgentDir = await mkdtemp(path.join(os.tmpdir(), "pipr-agent-"));
+    const piExecutable = path.join(workspace, "fake-pi.sh");
+    try {
+      await Bun.write(piExecutable, "#!/bin/sh\nprintenv\n");
+      await chmod(piExecutable, 0o755);
+
+      const result = await runPi({
+        workspace,
+        piExecutable,
+        piAgentDir,
+        prompt: "Review this diff.",
+        env: {
+          PATH: process.env.PATH,
+          SECRET_SHOULD_NOT_LEAK: "hidden",
+        },
+        provider: {
+          id: "local-review",
+          provider: "openai-codex",
+          model: "gpt-5.5",
+          thinking: "high",
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(envLine(result.stdout, "PI_CODING_AGENT_DIR")).toBe(piAgentDir);
+      expect(envLine(result.stdout, "HOME")).not.toBe(os.homedir());
+      expect(result.stdout).not.toContain("SECRET_SHOULD_NOT_LEAK");
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+      await rm(piAgentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a model without an API key when no Pi agent directory is supplied", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piExecutable = path.join(workspace, "fake-pi.sh");
+    try {
+      await Bun.write(piExecutable, "#!/bin/sh\nexit 0\n");
+      await chmod(piExecutable, 0o755);
+
+      await expect(
+        runPi({
+          workspace,
+          piExecutable,
+          prompt: "Review this diff.",
+          provider: {
+            id: "local-review",
+            provider: "openai-codex",
+            model: "gpt-5.5",
+            thinking: "high",
+          },
+        }),
+      ).rejects.toThrow(
+        "Model 'local-review' does not declare apiKey and requires a Pi agent directory",
+      );
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a selected API-key model when its provider env var is missing", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piExecutable = path.join(workspace, "fake-pi.sh");
+    try {
+      await Bun.write(piExecutable, "#!/bin/sh\nexit 0\n");
+      await chmod(piExecutable, 0o755);
+
+      await expect(
+        runPi({
+          workspace,
+          piExecutable,
+          prompt: "Review this diff.",
+          env: { PATH: process.env.PATH },
+          provider: {
+            id: "hosted-review",
+            provider: "deepseek",
+            model: "deepseek-v4-pro",
+            apiKeyEnv: "DEEPSEEK_API_KEY",
+            thinking: "high",
+          },
+        }),
+      ).rejects.toThrow("Missing provider env var for model 'hosted-review': DEEPSEEK_API_KEY");
+    } finally {
       await rm(workspace, { recursive: true, force: true });
     }
   });
@@ -519,6 +631,37 @@ describe("buildPiArgs", () => {
     expect(result.stdout).not.toContain("PIPR_RUNTIME_TOOLS_DATA=");
   });
 
+  it("rejects custom tools that collide with structural runtime tools", async () => {
+    await expect(
+      runFakePiWithToolOptions({
+        runtimeTools: {
+          manifest: emptyDiffManifest(),
+          toolResponseMaxBytes: 10_000,
+          structuralAnalysis: {
+            available: true,
+            version: "0.44.1",
+            headFiles: [],
+            baseFiles: [],
+            diagnostics: { durationMs: 1, fileCount: 0, declarationCount: 0 },
+          },
+        },
+        customTools: {
+          context: { run: { id: "test" } },
+          tools: [
+            {
+              name: "pipr_ast_grep",
+              input: passthroughSchema(),
+              output: passthroughSchema(),
+              async execute(_context, input) {
+                return input;
+              },
+            },
+          ],
+        },
+      }),
+    ).rejects.toThrow("Pi tool name 'pipr_ast_grep' is registered more than once");
+  });
+
   it("copies provider keys from the supplied source env", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
     const piExecutable = path.join(workspace, "fake-pi.sh");
@@ -623,10 +766,16 @@ describe("buildPiArgs", () => {
       usage: {
         input: 1_200,
         output: 120,
-        cacheRead: 0,
-        cacheWrite: 0,
+        cacheRead: 300,
+        cacheWrite: 30,
         totalTokens: 1_320,
-        cost: { input: 0.0012, output: 0.0006, cacheRead: 0, cacheWrite: 0, total: 0.0018 },
+        cost: {
+          input: 0.0012,
+          output: 0.0006,
+          cacheRead: 0.0001,
+          cacheWrite: 0.0002,
+          total: 0.0018,
+        },
       },
     };
     const finalMessage = {
@@ -636,10 +785,16 @@ describe("buildPiArgs", () => {
       usage: {
         input: 800,
         output: 80,
-        cacheRead: 0,
-        cacheWrite: 0,
+        cacheRead: 200,
+        cacheWrite: 20,
         totalTokens: 880,
-        cost: { input: 0.0008, output: 0.0004, cacheRead: 0, cacheWrite: 0, total: 0.0012 },
+        cost: {
+          input: 0.0008,
+          output: 0.0004,
+          cacheRead: 0.0001,
+          cacheWrite: 0.0002,
+          total: 0.0012,
+        },
       },
     };
     try {
@@ -670,6 +825,234 @@ describe("buildPiArgs", () => {
         inputTokens: 2_000,
         outputTokens: 200,
         costUsd: 0.003,
+        cacheReadTokens: 500,
+        cacheWriteTokens: 50,
+        cacheUsageStatus: "complete",
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("marks overflowing cache usage partial without corrupting retained cache totals", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piExecutable = path.join(workspace, "fake-pi");
+    const messages = [
+      {
+        role: "assistant",
+        model: "large-cache-model",
+        content: [],
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: Number.MAX_SAFE_INTEGER,
+          cacheWrite: 3,
+          cost: { total: 0.001 },
+        },
+      },
+      {
+        role: "assistant",
+        model: "final-model",
+        content: [{ type: "text", text: "{}" }],
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 1,
+          cacheWrite: 4,
+          cost: { total: 0.001 },
+        },
+      },
+    ];
+    try {
+      await Bun.write(
+        piExecutable,
+        [
+          "#!/usr/bin/env bun",
+          ...messages.map(
+            (message) =>
+              `console.log(${JSON.stringify(JSON.stringify({ type: "message_end", message }))});`,
+          ),
+        ].join("\n"),
+      );
+      await chmod(piExecutable, 0o755);
+
+      const result = await runPi({
+        workspace,
+        piExecutable,
+        prompt: "Review this diff.",
+        ...deepseekRunOptions(),
+      });
+
+      expect(result.usage).toEqual({
+        status: "complete",
+        inputTokens: 2,
+        outputTokens: 2,
+        costUsd: 0.002,
+        cacheReadTokens: Number.MAX_SAFE_INTEGER,
+        cacheWriteTokens: 7,
+        cacheUsageStatus: "partial",
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("retains one-sided cache usage and marks it partial", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piExecutable = path.join(workspace, "fake-pi");
+    const message = {
+      role: "assistant",
+      model: "partial-cache-model",
+      content: [{ type: "text", text: "{}" }],
+      usage: {
+        input: 10,
+        output: 2,
+        cacheRead: 7,
+        cost: { total: 0.001 },
+      },
+    };
+    try {
+      await Bun.write(
+        piExecutable,
+        [
+          "#!/usr/bin/env bun",
+          `console.log(${JSON.stringify(JSON.stringify({ type: "message_end", message }))});`,
+        ].join("\n"),
+      );
+      await chmod(piExecutable, 0o755);
+
+      const result = await runPi({
+        workspace,
+        piExecutable,
+        prompt: "Review this diff.",
+        ...deepseekRunOptions(),
+      });
+
+      expect(result.usage).toMatchObject({
+        cacheReadTokens: 7,
+        cacheWriteTokens: 0,
+        cacheUsageStatus: "partial",
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("marks cache usage partial when a later assistant message omits usage", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piExecutable = path.join(workspace, "fake-pi");
+    const messages = [
+      {
+        role: "assistant",
+        model: "cached-model",
+        content: [],
+        usage: {
+          input: 10,
+          output: 2,
+          cacheRead: 7,
+          cacheWrite: 1,
+          cost: { total: 0.001 },
+        },
+      },
+      {
+        role: "assistant",
+        model: "final-model",
+        content: [{ type: "text", text: "{}" }],
+      },
+    ];
+    try {
+      await Bun.write(
+        piExecutable,
+        [
+          "#!/usr/bin/env bun",
+          ...messages.map(
+            (message) =>
+              `console.log(${JSON.stringify(JSON.stringify({ type: "message_end", message }))});`,
+          ),
+        ].join("\n"),
+      );
+      await chmod(piExecutable, 0o755);
+
+      const result = await runPi({
+        workspace,
+        piExecutable,
+        prompt: "Review this diff.",
+        ...deepseekRunOptions(),
+      });
+
+      expect(result.usage).toEqual({
+        status: "partial",
+        inputTokens: 10,
+        outputTokens: 2,
+        costUsd: 0.001,
+        cacheReadTokens: 7,
+        cacheWriteTokens: 1,
+        cacheUsageStatus: "partial",
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("collects condensed Diff Manifest coverage from Pi tool events", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pipr-source-"));
+    const piExecutable = path.join(workspace, "fake-pi");
+    const manifest = reviewTestManifest();
+    try {
+      const events = [
+        {
+          type: "tool_execution_start",
+          toolCallId: "read-1",
+          toolName: "pipr_read_at_ref",
+          args: { path: "src/a.ts", ref: "head", rangeId: "range-1" },
+        },
+        {
+          type: "tool_execution_end",
+          toolCallId: "read-1",
+          toolName: "pipr_read_at_ref",
+          result: {
+            details: {
+              path: "src/a.ts",
+              rangeId: "range-1",
+              available: true,
+              truncated: false,
+            },
+          },
+        },
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "{}" }],
+          },
+        },
+      ];
+      await Bun.write(
+        piExecutable,
+        [
+          "#!/usr/bin/env bun",
+          ...events.map((event) => `console.log(${JSON.stringify(JSON.stringify(event))});`),
+        ].join("\n"),
+      );
+      await chmod(piExecutable, 0o755);
+
+      const result = await runPi({
+        workspace,
+        piExecutable,
+        prompt: "Review this diff.",
+        diffContext: { manifest, mode: "condensed" },
+        ...deepseekRunOptions(),
+      });
+
+      expect(result.diffContextCoverage).toEqual({
+        files: [
+          {
+            path: "src/a.ts",
+            rangeIds: ["range-1", "range-2"],
+            coveredRangeIds: ["range-1"],
+            fullFile: false,
+          },
+        ],
       });
     } finally {
       await rm(workspace, { recursive: true, force: true });
@@ -768,6 +1151,9 @@ describe("buildPiArgs", () => {
         inputTokens: 100,
         outputTokens: 10,
         costUsd: 0.001,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        cacheUsageStatus: "unavailable",
       });
       expect(result.stream).toMatchObject({
         jsonEventCount: 513,
@@ -1154,6 +1540,9 @@ describe("buildPiArgs", () => {
         inputTokens: Number.MAX_SAFE_INTEGER,
         outputTokens: 15,
         costUsd: 0.002,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        cacheUsageStatus: "unavailable",
       });
     } finally {
       await rm(workspace, { recursive: true, force: true });
@@ -1168,6 +1557,8 @@ describe("buildPiArgs", () => {
         piExecutable,
         [
           "#!/usr/bin/env bun",
+          'console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: "read-1", toolName: "pipr_read_at_ref", args: { path: "src/a.ts", ref: "head", rangeId: "range-1" } }));',
+          'console.log(JSON.stringify({ type: "tool_execution_end", toolCallId: "read-1", toolName: "pipr_read_at_ref", result: { details: { path: "src/a.ts", rangeId: "range-1", available: true, truncated: false } } }));',
           'console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", model: "model", content: [{ type: "text", text: "{}" }], usage: { input: 10, output: 2, cost: { total: 0.001 } } } }));',
           'console.log("not-json");',
         ].join("\n"),
@@ -1178,6 +1569,7 @@ describe("buildPiArgs", () => {
         workspace,
         piExecutable,
         prompt: "Review this diff.",
+        diffContext: { manifest: reviewTestManifest(), mode: "condensed" },
         ...deepseekRunOptions(),
       });
 
@@ -1186,6 +1578,7 @@ describe("buildPiArgs", () => {
       expect(result.stderr).toBe("Pi JSON output was malformed");
       expect(result.stderr).not.toContain("not-json");
       expect(result.usage).toBeUndefined();
+      expect(result.diffContextCoverage?.files[0]?.coveredRangeIds).toEqual(["range-1"]);
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }

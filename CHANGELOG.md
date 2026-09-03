@@ -4,6 +4,119 @@ This changelog is generated from Conventional Commits by Release Please.
 Published releases and downloadable CLI artifacts are available on
 [GitHub Releases](https://github.com/somus/pipr/releases).
 
+## [0.8.0](https://github.com/somus/pipr/compare/v0.7.0...v0.8.0) (2026-08-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* trigger 0.8.0 release
+
+### Features
+
+* improve review run observability ([#141](https://github.com/somus/pipr/issues/141)) ([b975983](https://github.com/somus/pipr/commit/b975983f237935330b4033a42f40e75db1ea2ede))
+* **sdk:** validate custom findings through task context ([#144](https://github.com/somus/pipr/issues/144)) ([99a3838](https://github.com/somus/pipr/commit/99a3838eca92318d0b67c6c85b139c830022a4ee))
+* trigger 0.8.0 release ([4821a0a](https://github.com/somus/pipr/commit/4821a0a903fa88515d6915eeee4e8d2160ff610d))
+
+
+### Bug Fixes
+
+* **bitbucket:** scope fork checkout credentials ([#143](https://github.com/somus/pipr/issues/143)) ([13dfdf6](https://github.com/somus/pipr/commit/13dfdf60f83a826b34503e2e200efb02f1066717))
+
+## [0.7.0](https://github.com/somus/pipr/compare/v0.6.3...v0.7.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* trigger 0.7.0 release
+
+### Features
+
+* add code host adapter foundations ([#133](https://github.com/somus/pipr/issues/133)) ([6e954f0](https://github.com/somus/pipr/commit/6e954f098989993d1b49e4017086214423a2b649))
+* add provider-neutral run observability ([#115](https://github.com/somus/pipr/issues/115)) ([d327b43](https://github.com/somus/pipr/commit/d327b43f4762fdbd1e7d263b3c2b536ce898c045))
+* support Azure DevOps Server ([#136](https://github.com/somus/pipr/issues/136)) ([623572c](https://github.com/somus/pipr/commit/623572c8e478141402df1b96dec9a4a1acddd121))
+* support Bitbucket Data Center ([#137](https://github.com/somus/pipr/issues/137)) ([01713fc](https://github.com/somus/pipr/commit/01713fcb4fef425813a7b62c59e9df6ecf6b382d))
+* support enterprise GitHub and GitLab ([#135](https://github.com/somus/pipr/issues/135)) ([6970df1](https://github.com/somus/pipr/commit/6970df1ed7533798dbe331891a55e50510e7122c))
+* support Gitea-compatible code hosts ([#134](https://github.com/somus/pipr/issues/134)) ([e9a3e95](https://github.com/somus/pipr/commit/e9a3e95baf14ebfc1623f20ed9982d71cb4672f4))
+* trigger 0.7.0 release ([d89c242](https://github.com/somus/pipr/commit/d89c2427b0ea9262a1c168567414ae77424a983d))
+
+
+### Bug Fixes
+
+* clarify combined review runtime ([d80ffd6](https://github.com/somus/pipr/commit/d80ffd659e12238955702bae67e6a74b18477bf6))
+* keep release fixture version aligned ([a25e68b](https://github.com/somus/pipr/commit/a25e68b2dc8a141734a5d1c03e553ab70401d9bc))
+* publish findings after resolved review threads ([#138](https://github.com/somus/pipr/issues/138)) ([2cfd820](https://github.com/somus/pipr/commit/2cfd820e6b918a564faddc01cd6027d943a59080))
+
+## [0.6.3](https://github.com/somus/pipr/compare/v0.6.2...v0.6.3) (2026-07-27)
+
+
+### Features
+
+* **config:** improve recipe comment layouts ([#130](https://github.com/somus/pipr/issues/130)) ([f731f15](https://github.com/somus/pipr/commit/f731f1567cf880cbfef3de9d0865920fbe70d9e3))
+* show live review progress ([#128](https://github.com/somus/pipr/issues/128)) ([e7a8bc3](https://github.com/somus/pipr/commit/e7a8bc3a84b2461043d0fc67027be551e5ab05d3))
+
+## [0.6.2](https://github.com/somus/pipr/compare/v0.6.1...v0.6.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* **release:** authenticate dogfood update with release token ([5401224](https://github.com/somus/pipr/commit/54012249a0e937ff8dba34f345f4e5b057eb38a7))
+
+## [0.6.1](https://github.com/somus/pipr/compare/v0.6.0...v0.6.1) (2026-07-25)
+
+
+### Features
+
+* support local Pi subscription authentication ([#121](https://github.com/somus/pipr/issues/121)) ([e9a071a](https://github.com/somus/pipr/commit/e9a071a3d6e846c0505fd27b1fbe1570e5d797b2))
+
+
+### Performance Improvements
+
+* **docker:** use precompiled ast-grep image ([#124](https://github.com/somus/pipr/issues/124)) ([44ea825](https://github.com/somus/pipr/commit/44ea82576986d89124aefaa499582a34415b84f7))
+
+## [0.6.0](https://github.com/somus/pipr/compare/v0.5.0...v0.6.0) (2026-07-25)
+
+
+### Features
+
+* **review:** add deep review recipe ([#116](https://github.com/somus/pipr/issues/116)) ([380f98d](https://github.com/somus/pipr/commit/380f98d8c7802186892bbe5642e1359b887bd646))
+* **review:** add two-agent review architecture ([#120](https://github.com/somus/pipr/issues/120)) ([abeb577](https://github.com/somus/pipr/commit/abeb577b6138d63a5c75715c1ec38d6985852ad9))
+* **runtime:** add shared structural analysis ([#117](https://github.com/somus/pipr/issues/117)) ([fe063b0](https://github.com/somus/pipr/commit/fe063b04aefe09762367aaafc2f3a76c0cc77393))
+* **runtime:** add structural manifest context ([#119](https://github.com/somus/pipr/issues/119)) ([5eb7746](https://github.com/somus/pipr/commit/5eb7746ca78e02fd436b14fc15b3e19636729d33))
+* **runtime:** add structural review tools ([#118](https://github.com/somus/pipr/issues/118)) ([676bc42](https://github.com/somus/pipr/commit/676bc426d7d1064c8ece1394a7b47cee72b261c9))
+
+
+### Bug Fixes
+
+* **release:** fetch history for audit ([4d208be](https://github.com/somus/pipr/commit/4d208be18be1cceac2fd066bd86ff68fae0fced6))
+* review defects in moved code ([#114](https://github.com/somus/pipr/issues/114)) ([e138c45](https://github.com/somus/pipr/commit/e138c450c8bf92459a7984c5c354d6e9a05d395f))
+
+
+### Miscellaneous Chores
+
+* **release:** prepare 0.6.0 ([1a575f0](https://github.com/somus/pipr/commit/1a575f01ecbd1ac3b7a899adf4d546b737e25bdd))
+
+## [0.5.0](https://github.com/somus/pipr/compare/v0.4.3...v0.5.0) (2026-07-20)
+
+
+### Features
+
+* **cli:** version local review JSON output ([#101](https://github.com/somus/pipr/issues/101)) ([312b31e](https://github.com/somus/pipr/commit/312b31e54f325befa3b67da7a1e4941d8c101508))
+* **config:** add explicit memory curation ([#102](https://github.com/somus/pipr/issues/102)) ([30f8b01](https://github.com/somus/pipr/commit/30f8b01cbb8d5f7457eb11f8fdbf5d2aeacbb895))
+* **runtime:** add run results and webhook history ([#106](https://github.com/somus/pipr/issues/106)) ([1aaed2b](https://github.com/somus/pipr/commit/1aaed2ba238df9bdf4fc133b204ac260eaa2a8ed))
+* **sdk:** expose review run context ([#107](https://github.com/somus/pipr/issues/107)) ([9bc33ed](https://github.com/somus/pipr/commit/9bc33ed6b338575a242f073995bcf9d12b9836de))
+* stabilize review outputs and release packages ([#104](https://github.com/somus/pipr/issues/104)) ([a25b6bc](https://github.com/somus/pipr/commit/a25b6bc0e85199d6381b43a31eb8c1943a50e7f9))
+
+
+### Bug Fixes
+
+* **runtime:** bound diff manifest construction ([#99](https://github.com/somus/pipr/issues/99)) ([9bb367a](https://github.com/somus/pipr/commit/9bb367a5d2cd9392e5e5e7fc858eb2ade9e20edd))
+* **sdk:** harden public runtime boundaries ([#103](https://github.com/somus/pipr/issues/103)) ([d1f45c6](https://github.com/somus/pipr/commit/d1f45c638f24f8fe3e69934b7c10d916cc2ab83d))
+
+
+### Miscellaneous Chores
+
+* release 0.5.0 ([4656539](https://github.com/somus/pipr/commit/4656539e7260294675f2a3ad9688403519f6c07a))
+
 ## [0.4.3](https://github.com/somus/pipr/compare/v0.4.2...v0.4.3) (2026-07-18)
 
 

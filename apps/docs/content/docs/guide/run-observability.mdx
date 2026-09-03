@@ -1,0 +1,120 @@
+---
+title: "Debug captured runs"
+description: "Find, diagnose, inspect, and download Pipr run evidence."
+---
+
+Pipr captures structured evidence for hosted reviews, commands, and verifier runs. Use `pipr runs` to diagnose slow phases, retries, invalid output, dropped findings, and publication failures without rerunning the model.
+
+## Understand capture protection
+
+GitHub Actions uploads content-free metadata by default. When you configure age recipients, it also uploads encrypted diagnostics containing redacted prompts, visible model output, diffs, and validation evidence.
+
+GitHub access permits artifact discovery and download. A matching local age identity is required to decrypt diagnostic content. Other code hosts can use local or webhook stores, or pass a protected package to `pipr runs inspect`.
+
+## Create a diagnostic identity
+
+Generate an X25519 age identity once:
+
+```bash
+pipr runs keygen
+```
+
+The command prints the public recipient and the private identity path. Store the recipient in the GitHub repository variable `PIPR_RUN_AGE_RECIPIENTS`.
+
+Keep the identity private. The command writes it with restrictive permissions and refuses to overwrite an existing or symlinked path.
+
+## List runs
+
+From a repository checkout:
+
+```bash
+pipr runs list --pr 123
+```
+
+Outside a checkout, pass the full change-request URL:
+
+```bash
+pipr runs list --url "$GITHUB_CHANGE_REQUEST_URL"
+```
+
+Set `PIPR_GITHUB_TOKEN` or `GITHUB_TOKEN` with Actions read access when the artifact is not anonymously readable.
+
+## Diagnose a run
+
+Show the latest completed review:
+
+```bash
+pipr runs show --pr 123
+```
+
+Include decrypted evidence:
+
+```bash
+pipr runs show \
+  --pr 123 \
+  --identity ~/.local/state/pipr/keys/run-observability.agekey
+```
+
+The diagnosis is deterministic and does not call a model. It reports phase timing, retries, repairs, tool duration, input, output, and cache token usage, resource data, validation drops, publication failures, and missing evidence.
+
+Use `--json` for automation. The JSON output remains content-free; download the validated bundle when an authorized process needs prompt, output, or diff files.
+
+Public telemetry exposes only aggregate diff-context file and range counts. Encrypted diagnostics can also contain the bounded `diff-context-coverage` artifact with exact covered and uncovered paths and range IDs.
+
+## Inspect an existing package
+
+Validate and diagnose a manually downloaded archive or directory:
+
+```bash
+pipr runs inspect path/to/package.zip
+```
+
+Pass `--identity <path>` for encrypted diagnostics. Pipr rejects invalid package structure, unsafe archive entries, schema errors, and hash mismatches.
+
+## Download a validated bundle
+
+Download and unpack a GitHub Actions package:
+
+```bash
+pipr runs download \
+  --pr 123 \
+  --identity ~/.local/state/pipr/keys/run-observability.agekey \
+  --output .pipr-runs/downloaded
+```
+
+Add `--archive` to preserve the provider archive beside the validated directory.
+
+## Capture a local review
+
+Local capture is opt-in:
+
+```bash
+pipr review --base origin/main --trace
+```
+
+Pass a path to `--trace` to choose the store. Without an explicit `--store`, `pipr runs` searches `.pipr-runs` and the repository-specific platform state directory.
+
+## Configure capture
+
+Operational settings stay outside `.pipr/config.ts`:
+
+| Setting | Purpose |
+| --- | --- |
+| `PIPR_RUN_CAPTURE` | Select `off`, `metadata`, or `diagnostic` |
+| `PIPR_RUN_AGE_RECIPIENTS` | Encrypt GitHub diagnostics for one or more recipients |
+| `PIPR_RUN_AGE_IDENTITY` | Select the default local identity |
+| `PIPR_RUN_STORE_DIR` | Select the local or webhook store |
+| `PIPR_RUN_RETENTION_DAYS` | Set webhook retention |
+| `PIPR_RUN_MAX_BYTES` | Set the webhook store quota |
+
+Recipient rotation affects future runs only. Keep old identities through the provider retention period when older diagnostics remain useful.
+
+## Export telemetry
+
+Set standard `OTEL_EXPORTER_OTLP_*` variables to export content-free traces, metrics, and logs. Exported telemetry contains timings, statuses, sizes, hashes, usage, and provider-neutral identifiers; it excludes prompts, model output, source text, environment values, and tool payload bodies.
+
+## Next steps
+
+- Use the [CLI reference](/docs/reference/cli#pipr-runs-list) for every filter and output option.
+- Map a diagnosed failure to its fix in [Troubleshooting](/docs/guide/troubleshooting).
+- Review [Trust and security](/docs/concepts/trust-security#diagnostic-data) before sharing a bundle.

@@ -22,11 +22,11 @@ _Avoid_: PR-authored runtime settings
 
 **Code Host Adapter**:
 The internal provider boundary for native events, permissions, checkout, comment publication, and inline location mapping.
-GitHub, GitLab.com, Azure DevOps Services, and Bitbucket Cloud are supported.
+GitHub.com, GitHub Enterprise Server, GitLab.com, GitLab Self-Managed, Azure DevOps Services, Azure DevOps Server 2022 and 2022.1, Bitbucket Cloud, Bitbucket Data Center 9.2 and later, Gitea, Forgejo, and Codeberg are supported.
 _Avoid_: GitHub runtime, provider-specific user config
 
 **Change Request**:
-The provider-neutral review target. GitHub, Bitbucket Cloud, and Azure DevOps Services map this to a pull request; GitLab.com maps it to a merge request.
+The provider-neutral review target. GitHub, Bitbucket, Azure DevOps Services and Server, Gitea, Forgejo, and Codeberg map this to a pull request; GitLab maps it to a merge request.
 _Avoid_: GitHub-only pull request when describing core runtime
 
 **TypeScript Config**:
@@ -56,6 +56,18 @@ _Avoid_: YAML workflow, block graph
 **Review Run**:
 The Pipr-owned path used by `ctx.change.diffManifest()` and `ctx.pi.run()`.
 _Avoid_: user-authored diff or validation block
+
+**Run Bundle**:
+The versioned, redacted diagnostic record for one Pipr process, identified by an OpenTelemetry trace ID called `executionId`. A bundle can reference a deterministic Review Run through `workId`.
+_Avoid_: Pipr Result, Review Run ID, raw session dump
+
+**Built-in Review**:
+The quick `pipr.review()` wrapper that runs a shardable findings agent followed by one summary agent and renders their combined result.
+_Avoid_: configurable built-in prompt, injected reviewer
+
+**Pipr Result**:
+The public, versioned result returned by hosted, local, and webhook delivery surfaces. A Pipr Result contains safe review or command output, bounded Review Run usage totals, and content-free diff context coverage counts, but excludes exact coverage identities, runtime plans, native identifiers, credentials, and raw errors.
+_Avoid_: Action-only result, raw runtime result
 
 **Diff Manifest**:
 The compact changed-code model that defines files, hunks, and ranges where review findings may be anchored.

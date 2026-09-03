@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { type PiprRunSummary, parsePiprResult } from "@usepipr/sdk";
 import {
   presentGitHubActionError,
   presentGitHubActionPublicationError,
@@ -73,7 +74,7 @@ const inlineDraft = {
 };
 const visibleStats = [
   "<details>",
-  "<summary>Review stats</summary>",
+  "<summary>Review completed in 1.3s</summary>",
   "",
   "| Metric | Total |",
   "| --- | ---: |",
@@ -86,6 +87,20 @@ const visibleStats = [
   "",
   "</details>",
 ].join("\n");
+const run: PiprRunSummary = {
+  id: "run-1",
+  trigger: "change-request",
+  baseSha: "base",
+  headSha: "head",
+  tasks: ["review"],
+  durationMs: 1_250,
+  models: ["deepseek-v4-pro"],
+  agentRuns: 1,
+  inputTokens: 500,
+  outputTokens: 50,
+  costUsd: 0.001,
+  usageStatus: "complete",
+};
 
 describe("presentGitHubActionResult", () => {
   it("presents review output and inline resolution warnings", async () => {
@@ -102,15 +117,16 @@ describe("presentGitHubActionResult", () => {
       [
         "result",
         JSON.stringify({
-          formatVersion: 1,
+          formatVersion: 2,
           kind: "review",
+          run,
           mainComment: `review body\n${visibleStats}`,
           inlineFindings: [finding],
           droppedFindings: [{ finding, reason: "outside range" }],
           taskChecks: [],
-          providerModels: ["deepseek-v4-pro"],
           repairAttempted: true,
           publication: {
+            state: "completed",
             mainComment: { action: "created" },
             inlineComments: { posted: 1, skipped: 1, failed: 0 },
             inlinePublicationErrorCount: 0,
@@ -119,6 +135,7 @@ describe("presentGitHubActionResult", () => {
         }),
       ],
     ]);
+    expect(parsePiprResult(JSON.parse(calls.output[1]?.[1] ?? "null"))).toBeDefined();
     expect(calls.output.join("\n")).not.toMatch(
       /apiKeyEnv|findingId|marker|reviewedHeadSha|trustedConfig|fnd_private|PRRT_private|"range"|"id":"10"/,
     );
@@ -129,7 +146,7 @@ describe("presentGitHubActionResult", () => {
     await presentGitHubActionResult(ignoredResult(), calls.sink);
     expect(calls.info).toEqual(["pipr ignored event: unsupported event"]);
     expect(calls.output).toEqual([
-      ["result", '{"formatVersion":1,"kind":"ignored","reason":"unsupported event"}'],
+      ["result", '{"formatVersion":2,"kind":"ignored","reason":"unsupported event"}'],
     ]);
   });
 
@@ -139,7 +156,7 @@ describe("presentGitHubActionResult", () => {
     expect(calls.info.at(-1)).toBe(
       "PIPR_DRY_RUN=1; stopping before review runtime, model, or GitHub publishing calls",
     );
-    expect(calls.output).toEqual([["result", '{"formatVersion":1,"kind":"dry-run"}']]);
+    expect(calls.output).toEqual([["result", '{"formatVersion":2,"kind":"dry-run"}']]);
   });
 
   it("presents generic failures as versioned output", async () => {
@@ -149,7 +166,7 @@ describe("presentGitHubActionResult", () => {
     expect(calls.output).toEqual([
       [
         "result",
-        '{"formatVersion":1,"kind":"error","message":"Pipr failed; see the Action log for details."}',
+        '{"formatVersion":2,"kind":"error","message":"Pipr failed; see the Action log for details."}',
       ],
     ]);
     expect(calls.output[0]?.[1]).not.toContain("provider-secret");
@@ -161,6 +178,10 @@ describe("presentGitHubActionResult", () => {
       "<!-- pipr:main-comment state=hidden -->",
       "",
       "<!-- pipr:header:hidden -->",
+      "",
+      "<!-- pipr:result:start -->",
+      "> ✅ **No actionable findings:** The review completed without actionable findings.",
+      "<!-- pipr:result:end -->",
       "",
       "    const reviewed = true;",
       "<!-- pipr:header:hidden -->",
@@ -176,6 +197,8 @@ describe("presentGitHubActionResult", () => {
     await presentGitHubActionResult(result, calls.sink);
 
     const expectedMainComment = [
+      "> ✅ **No actionable findings:** The review completed without actionable findings.",
+      "",
       "    const reviewed = true;",
       "<!-- pipr:header:hidden -->",
       "Task-authored marker example.",
@@ -187,19 +210,6 @@ describe("presentGitHubActionResult", () => {
     expect(JSON.parse(calls.output[1]?.[1] ?? "null").mainComment).toBe(expectedMainComment);
   });
 
-  it("presents command help", async () => {
-    const calls = recordingPresenter();
-    await presentGitHubActionResult(commandHelpResult(), calls.sink);
-    expect(calls.info.at(-1)).toBe("pipr command help: missing question");
-    expect(calls.output).toEqual([
-      ["main-comment", "usage body"],
-      [
-        "result",
-        '{"formatVersion":1,"kind":"command-help","reason":"missing question","mainComment":"usage body"}',
-      ],
-    ]);
-  });
-
   it("presents command responses and publication metadata", async () => {
     const calls = recordingPresenter();
     await presentGitHubActionResult(commandResponseResult(), calls.sink);
@@ -208,9 +218,38 @@ describe("presentGitHubActionResult", () => {
       ["main-comment", "answer body"],
       [
         "result",
-        '{"formatVersion":1,"kind":"command-response","mainComment":"answer body","publication":{"action":"created"}}',
+        JSON.stringify({
+          formatVersion: 2,
+          kind: "command-response",
+          run: { ...run, trigger: "command", tasks: ["ask"] },
+          mainComment: "answer body",
+          publication: { state: "completed", action: "created" },
+        }),
       ],
     ]);
+  });
+
+  it("bounds run metadata before validating public output", async () => {
+    const calls = recordingPresenter();
+    await presentGitHubActionResult(
+      commandResponseResult({
+        run: {
+          ...run,
+          trigger: "command",
+          tasks: Array.from({ length: 201 }, (_, index) => `task-${index}-${"x".repeat(200)}`),
+          models: Array.from({ length: 21 }, (_, index) => `model-${index}-${"x".repeat(200)}`),
+        },
+      }),
+      calls.sink,
+    );
+
+    const result = parsePiprResult(JSON.parse(calls.output.at(-1)?.[1] ?? "null"));
+    expect(result.kind).toBe("command-response");
+    if (result.kind !== "command-response") throw new Error("expected command response result");
+    expect(result.run.tasks).toHaveLength(200);
+    expect(result.run.models).toHaveLength(20);
+    expect(result.run.tasks.every((task) => task.length <= 200)).toBe(true);
+    expect(result.run.models.every((model) => model.length <= 200)).toBe(true);
   });
 
   it("presents verifier failures as warnings", async () => {
@@ -222,7 +261,12 @@ describe("presentGitHubActionResult", () => {
     expect(calls.output).toEqual([
       [
         "result",
-        '{"formatVersion":1,"kind":"verifier","publication":{"inlineResolutionErrorCount":1}}',
+        JSON.stringify({
+          formatVersion: 2,
+          kind: "verifier",
+          run: { ...run, trigger: "verifier", tasks: ["pipr-internal-verifier"] },
+          publication: { state: "completed", inlineResolutionErrorCount: 1 },
+        }),
       ],
     ]);
   });
@@ -247,7 +291,7 @@ describe("presentGitHubActionResult", () => {
       [
         "result",
         JSON.stringify({
-          formatVersion: 1,
+          formatVersion: 2,
           kind: "publication-error",
           message: "Pipr could not complete publication; see the Action log for details.",
           publication: {
@@ -271,7 +315,7 @@ describe("presentGitHubActionResult", () => {
     expect(calls.output).toEqual([
       [
         "result",
-        '{"formatVersion":1,"kind":"publication-error","message":"Pipr could not complete publication; see the Action log for details."}',
+        '{"formatVersion":2,"kind":"publication-error","message":"Pipr could not complete publication; see the Action log for details."}',
       ],
     ]);
   });
@@ -293,22 +337,13 @@ function dryRunResult(overrides: Omit<Partial<ResultOf<"dry-run">>, "kind"> = {}
   return { ...loadedContext(), kind: "dry-run", ...overrides } satisfies ResultOf<"dry-run">;
 }
 
-function commandHelpResult(overrides: Omit<Partial<ResultOf<"command-help">>, "kind"> = {}) {
-  return {
-    ...loadedContext(),
-    kind: "command-help",
-    reason: "missing question",
-    body: "usage body",
-    ...overrides,
-  } satisfies ResultOf<"command-help">;
-}
-
 function commandResponseResult(
   overrides: Omit<Partial<ResultOf<"command-response">>, "kind"> = {},
 ) {
   return {
     ...loadedContext(),
     kind: "command-response",
+    run: { ...run, trigger: "command", tasks: ["ask"] },
     command: "ask",
     response: { body: "answer body" },
     publication: { action: "created", id: "9" },
@@ -320,6 +355,7 @@ function verifierResult(overrides: Omit<Partial<ResultOf<"verifier">>, "kind"> =
   return {
     ...loadedContext(),
     kind: "verifier",
+    run: { ...run, trigger: "verifier", tasks: ["pipr-internal-verifier"] },
     errors: ["fnd_private thread PRRT_private is stale"],
     ...overrides,
   } satisfies ResultOf<"verifier">;
@@ -331,6 +367,7 @@ function reviewResult(overrides: Omit<Partial<ResultOf<"review">>, "kind"> = {})
     kind: "review",
     review: {
       kind: "review",
+      run,
       provider: {
         id: "deepseek/deepseek-v4-pro",
         provider: "deepseek",

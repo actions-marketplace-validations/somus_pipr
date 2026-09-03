@@ -1,6 +1,12 @@
-import type { PublicationPlan, ThreadAction } from "../review/comment.js";
-import type { PriorReviewState } from "../review/prior-state.js";
-import type { PublicationResult } from "../review/publication-result.js";
+import type {
+  InlineThreadContext,
+  NativeId,
+  PriorReviewState,
+  PublicationPlan,
+  PublicationResult,
+  ReviewProgressLease,
+  ThreadAction,
+} from "../publication/types.js";
 import type {
   ChangeRequestEventContext,
   ChangeRequestRef,
@@ -14,8 +20,6 @@ export type HostEventParseOptions = {
   env: NodeJS.ProcessEnv;
   workspace: string;
 };
-
-export type NativeId = string;
 
 export type CommandCommentEvent = {
   eventName: string;
@@ -35,19 +39,7 @@ export type CommandResponsePublicationResult = {
   id: NativeId;
 };
 
-export type InlineThreadContext = {
-  findingId: string;
-  findingHeadSha: string;
-  parentCommentId: NativeId;
-  parentBody: string;
-  threadId?: string;
-  threadResolved: boolean;
-  comments: Array<{
-    id: NativeId;
-    body: string;
-    authorLogin?: string;
-  }>;
-};
+export type CommandLifecycleState = "accepted" | "running" | "completed" | "failed" | "superseded";
 
 export type ReviewCommentReplyEvent = {
   eventName: string;
@@ -118,12 +110,33 @@ export type CodeHostPublication = {
   publish(options: {
     plan: PublicationPlan;
     change: ChangeRequestEventContext;
+    progressLease?: ReviewProgressLease;
   }): Promise<PublicationResult>;
+  publishReviewProgress?(options: {
+    change: ChangeRequestEventContext;
+    renderBody(currentBody: string | undefined): string;
+    reviewedHeadSha: string;
+    expectedToken?: string;
+  }): Promise<
+    | {
+        status: "published";
+        action: "created" | "updated";
+        id: NativeId;
+      }
+    | { status: "superseded" }
+  >;
   publishCommandResponse?(options: {
     change: ChangeRequestEventContext;
     sourceCommentId: NativeId;
     commandName: string;
     body: string;
+  }): Promise<CommandResponsePublicationResult>;
+  publishCommandStatus?(options: {
+    change: ChangeRequestEventContext;
+    sourceCommentId: NativeId;
+    commandName: string;
+    state: CommandLifecycleState;
+    reviewedHeadSha: string;
   }): Promise<CommandResponsePublicationResult>;
   publishThreadActions?(options: {
     change: ChangeRequestEventContext;

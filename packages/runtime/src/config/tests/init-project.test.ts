@@ -45,6 +45,9 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
 
     expect(documentedWorkflow.replace(" # x-release-please-version", "")).toBe(runtimeWorkflow);
     expect(runtimeWorkflow).toContain("actions/cache@v4");
+    expect(runtimeWorkflow).toContain("checks: write");
+    expect(runtimeWorkflow).toContain("types: [opened, synchronize, reopened, ready_for_review]");
+    expect(runtimeWorkflow).toContain("contents: read");
   });
 
   it("creates the official minimal .pipr tree and validates it", async () => {
@@ -58,7 +61,7 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
     expect(result.created).toEqual(expect.arrayContaining(packageInitFiles));
     expect(result.overwritten).toEqual([]);
     expect(configTs).toContain("pipr.review");
-    expect(configTs).toContain("## Review Result");
+    expect(configTs).toContain("## 🧭 Summary");
     expect(configTs).toContain("See inline comments in the diff.");
     expect(await Bun.file(path.join(rootDir, ".pipr", "tsconfig.json")).text()).toContain(
       "moduleResolution",
@@ -76,14 +79,18 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
     );
     expect(await Bun.file(path.join(rootDir, ".pipr", ".gitignore")).text()).toBe("node_modules\n");
     const workflow = await Bun.file(path.join(rootDir, ".github", "workflows", "pipr.yml")).text();
-    expect(workflow).toContain("uses: somus/pipr@v0.4.3"); // x-release-please-version
+    expect(workflow).toContain("uses: somus/pipr@v0.8.0"); // x-release-please-version
     expect(workflow).toContain("actions/cache@v4");
+    expect(workflow).toContain("actions/upload-artifact@v6");
+    expect(workflow).toContain("vars.PIPR_RUN_AGE_RECIPIENTS");
+    expect(workflow).toContain("if: always() && steps.pipr.outputs.run-bundle-path != ''");
+    expect(workflow).toContain("retention-days: 14");
     expect(workflow).toContain("hashFiles('.pipr/bun.lock')");
-    expect(workflow).toContain("checks: write");
+    expect(workflow).not.toContain("checks: write");
     expect(workflow).toContain("pull_request_review_comment:");
     expect(workflow).toContain("types: [created]");
     expect(workflow).not.toContain("config-dir:");
-    expect([...workflow.matchAll(/^ {8}with:$/gm)]).toHaveLength(2);
+    expect([...workflow.matchAll(/^ {8}with:$/gm)]).toHaveLength(3);
     expect(workflow).not.toContain("provider-id:");
     expect(workflow).not.toContain("provider: deepseek");
     expect(workflow).not.toContain("model: deepseek-v4-pro");
@@ -196,10 +203,26 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
     expect(workflow).toContain("config-dir: config/pipr");
     expect(workflow).toContain("hashFiles('config/pipr/bun.lock')");
     expect(workflow).not.toContain("hashFiles('.pipr/bun.lock')");
-    expect([...workflow.matchAll(/^ {8}with:$/gm)]).toHaveLength(3);
+    expect([...workflow.matchAll(/^ {8}with:$/gm)]).toHaveLength(4);
     expect(await Bun.file(path.join(rootDir, "config", "pipr", "config.ts")).text()).toContain(
       "pipr.review",
     );
+  });
+
+  it("renders internal runtime and checkout references for disconnected GitHub setup", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      runtimeImage: "registry.internal.example/pipr:v1",
+      checkoutAction: "internal-actions/checkout@v6",
+    });
+    const workflow = await Bun.file(path.join(rootDir, ".github", "workflows", "pipr.yml")).text();
+
+    expect(workflow).toContain("uses: internal-actions/checkout@v6");
+    expect(workflow).toContain("uses: docker://registry.internal.example/pipr:v1");
+    expect(workflow).toContain("args: host-run --host github --config-dir .pipr");
+    expect(workflow).not.toContain("uses: somus/pipr@");
   });
 
   it("refuses and force-overwrites an existing GitHub workflow", async () => {
@@ -218,7 +241,7 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
 
     expect(result.overwritten).toEqual([path.join(".github", "workflows", "pipr.yml")]);
     expect(await Bun.file(path.join(rootDir, ".github", "workflows", "pipr.yml")).text()).toContain(
-      "uses: somus/pipr@v0.4.3", // x-release-please-version
+      "uses: somus/pipr@v0.8.0", // x-release-please-version
     );
   });
 
@@ -244,16 +267,229 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
       adapters: ["gitlab"],
     });
     const pipeline = await Bun.file(path.join(rootDir, ".gitlab-ci.yml")).text();
+    const environment = await Bun.file(path.join(rootDir, "gitlab.pipr.env.example")).text();
 
     expect(result.created).toContain(".gitlab-ci.yml");
-    expect(pipeline).toContain("ghcr.io/somus/pipr:v0.4.3"); // x-release-please-version
+    expect(result.created).toContain("gitlab.pipr.env.example");
+    expect(pipeline).toContain("ghcr.io/somus/pipr:v0.8.0"); // x-release-please-version
     expect(pipeline).toContain("pipr host-run --host gitlab --config-dir config/pipr");
     expect(pipeline).toContain('PIPR_CODE_HOST: "gitlab"');
     expect(pipeline).toContain('GIT_DEPTH: "0"');
+    expect(pipeline).not.toContain("artifacts:");
+    expect(pipeline).not.toContain(".pipr-runs/");
+    expect(environment).toContain("GITLAB_API_URL=");
+    expect(environment).toContain("GITLAB_TOKEN=");
+    expect(environment).toContain("PIPR_WEBHOOK_SECRET=");
     expect(await fileExists(path.join(rootDir, ".github", "workflows", "pipr.yml"))).toBe(false);
   });
 
-  it("creates an Azure trusted-runner environment template without a credentialed PR pipeline", async () => {
+  it("uses the selected GitHub runner in generated workflows", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: ["github"],
+      githubRunner: "true",
+    });
+
+    const workflow = await Bun.file(path.join(rootDir, ".github", "workflows", "pipr.yml")).text();
+    expect(workflow).toContain('runs-on: "true"');
+    expect(workflow).not.toContain("runs-on: ubuntu-latest");
+  });
+
+  it("generates a GHES-compatible workflow", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: ["github"],
+      githubEnterpriseServer: true,
+    });
+
+    const workflow = await Bun.file(path.join(rootDir, ".github", "workflows", "pipr.yml")).text();
+    expect(workflow).toContain("runs-on: [self-hosted, linux]");
+    expect(workflow).toContain("uses: actions/upload-artifact@v3.2.2-node20");
+    expect(workflow).toContain("include-hidden-files: true");
+  });
+
+  it("uses the selected runtime image in generated container-based adapters", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: ["gitlab", "azure-devops", "bitbucket"],
+      runtimeImage: "registry.internal.example/pipr:v1",
+    });
+
+    for (const relativePath of [
+      ".gitlab-ci.yml",
+      "azure-pipelines.pipr.yml",
+      "bitbucket-pipelines.yml",
+    ]) {
+      expect(await Bun.file(path.join(rootDir, relativePath)).text()).toContain(
+        "registry.internal.example/pipr:v1",
+      );
+    }
+  });
+
+  it("creates Gitea, Forgejo, and Codeberg Actions scaffolding", async () => {
+    for (const adapter of ["gitea", "forgejo", "codeberg"] as const) {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), `pipr-init-${adapter}-`));
+      const result = await initOfficialMinimalProject({
+        rootDir,
+        adapters: [adapter],
+        minimal: true,
+      });
+      const workflowPath =
+        adapter === "gitea"
+          ? path.join(".gitea", "workflows", "pipr.yml")
+          : path.join(".forgejo", "workflows", "pipr.yml");
+      const workflow = await Bun.file(path.join(rootDir, workflowPath)).text();
+
+      expect(result.created).toContain(workflowPath);
+      expect(() => Bun.YAML.parse(workflow)).not.toThrow();
+      expect(workflow).toContain(`host-run --host ${adapter} --config-dir .pipr`);
+      expect(workflow).toContain("pull_request_target:");
+      expect(workflow).not.toContain("\n  pull_request:\n");
+      expect(workflow).not.toContain("pull_request_review_comment:");
+      expect(workflow).toContain("ghcr.io/somus/pipr:v0.8.0"); // x-release-please-version
+      expect(workflow).toContain(adapter === "gitea" ? "GITEA_TOKEN:" : "FORGEJO_TOKEN:");
+      expect(workflow).toContain(
+        adapter === "gitea"
+          ? "GITEA_API_URL: $" + "{{ gitea.api_url }}"
+          : adapter === "forgejo"
+            ? "FORGEJO_API_URL: $" + "{{ forgejo.api_url }}"
+            : "CODEBERG_API_URL: $" + "{{ forgejo.api_url }}",
+      );
+      expect(result.created).toContain(`${adapter}.pipr.env.example`);
+    }
+  });
+
+  it("rejects Forgejo and Codeberg init together because they share a workflow path", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        adapters: ["forgejo", "codeberg"],
+        minimal: true,
+      }),
+    ).rejects.toThrow("target the same workflow path");
+  });
+
+  it("rejects setup references that could inject workflow lines", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        runtimeImage: "registry.internal/pipr:v1\n    malicious: true",
+      }),
+    ).rejects.toThrow("runtime image");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        checkoutAction: "actions/checkout@v6\n    malicious: true",
+      }),
+    ).rejects.toThrow("checkout action");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        githubRunner: "self-hosted\n    malicious: true",
+      }),
+    ).rejects.toThrow("GitHub runner label");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        runtimeImage: "registry.internal/pipr:v1;run-command",
+      }),
+    ).rejects.toThrow("runtime image");
+  });
+
+  it("rejects malformed setup references before writing adapter files", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        checkoutAction: "actions/checkout",
+      }),
+    ).rejects.toThrow("checkout action");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        checkoutAction: "actions//checkout@v6",
+      }),
+    ).rejects.toThrow("checkout action");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        checkoutAction: "owner/repository/../checkout@v6",
+      }),
+    ).rejects.toThrow("checkout action");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        checkoutAction: "./checkout@v6",
+      }),
+    ).rejects.toThrow("checkout action");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        runtimeImage: "https://registry.internal/pipr:v1",
+      }),
+    ).rejects.toThrow("runtime image");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        runtimeImage: "registry.internal//pipr:v1",
+      }),
+    ).rejects.toThrow("runtime image");
+    await expect(
+      initOfficialMinimalProject({
+        rootDir,
+        runtimeImage: `registry.internal/pipr@sha256:${"a".repeat(32)}`,
+      }),
+    ).rejects.toThrow("runtime image");
+    expect(await fileExists(path.join(rootDir, ".github", "workflows", "pipr.yml"))).toBe(false);
+  });
+
+  it("accepts an OCI image hosted on a bracketed IPv6 registry", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+    const runtimeImage = "[2001:db8::1]:5000/pipr:v1";
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: ["gitlab", "azure-devops", "bitbucket"],
+      minimal: true,
+      runtimeImage,
+    });
+
+    const gitlab = await Bun.file(path.join(rootDir, ".gitlab-ci.yml")).text();
+    const azure = await Bun.file(path.join(rootDir, "azure-pipelines.pipr.yml")).text();
+    const bitbucket = await Bun.file(path.join(rootDir, "bitbucket-pipelines.yml")).text();
+    expect(() => Bun.YAML.parse(gitlab)).not.toThrow();
+    expect(() => Bun.YAML.parse(azure)).not.toThrow();
+    expect(() => Bun.YAML.parse(bitbucket)).not.toThrow();
+    expect(gitlab).toContain(`name: '${runtimeImage}'`);
+    expect(azure).toContain(`        '${runtimeImage}' \\`);
+    expect(bitbucket).toContain(`image: '${runtimeImage}'`);
+  });
+
+  it("accepts a runtime image pinned to a valid SHA-256 digest", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
+    const runtimeImage = `registry.internal/pipr@sha256:${"a".repeat(64)}`;
+
+    await initOfficialMinimalProject({
+      rootDir,
+      adapters: ["gitlab"],
+      minimal: true,
+      runtimeImage,
+    });
+
+    expect(await Bun.file(path.join(rootDir, ".gitlab-ci.yml")).text()).toContain(runtimeImage);
+  });
+
+  it("creates Azure trusted-runner settings and an explicit immutable PR pipeline", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
 
     const result = await initOfficialMinimalProject({
@@ -262,12 +498,22 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
       adapters: ["azure-devops"],
     });
     const environment = await Bun.file(path.join(rootDir, "azure-devops.pipr.env.example")).text();
+    const pipeline = await Bun.file(path.join(rootDir, "azure-pipelines.pipr.yml")).text();
 
     expect(result.created).toContain("azure-devops.pipr.env.example");
+    expect(environment).toContain("AZURE_DEVOPS_COLLECTION_URL=");
+    expect(environment).toContain("AZURE_DEVOPS_API_VERSION=");
     expect(environment).toContain("AZURE_DEVOPS_BEARER_TOKEN=");
+    expect(environment).toContain("AZURE_DEVOPS_TOKEN=");
     expect(environment).toContain("PIPR_AZURE_SUBSCRIPTION_ID=");
     expect(environment).toContain("PIPR_WEBHOOK_SECRET=");
-    expect(await fileExists(path.join(rootDir, "azure-pipelines.pipr.yml"))).toBe(false);
+    expect(result.created).toContain("azure-pipelines.pipr.yml");
+    expect(pipeline).toContain("host-run --host azure-devops --config-dir config/pipr");
+    expect(pipeline).toContain("--env AZURE_DEVOPS_API_VERSION");
+    expect(pipeline).toContain(
+      "# Azure DevOps Server: replace this hosted image with your self-hosted pool.",
+    );
+    expect(pipeline).not.toContain(".pipr-runs");
   });
 
   it("creates a Bitbucket trusted-runner environment template", async () => {
@@ -278,25 +524,35 @@ describe("initOfficialMinimalProject: project scaffolding and safety", () => {
       adapters: ["bitbucket"],
     });
     const environment = await Bun.file(path.join(rootDir, "bitbucket.pipr.env.example")).text();
+    const pipeline = await Bun.file(path.join(rootDir, "bitbucket-pipelines.yml")).text();
     expect(result.created).toContain("bitbucket.pipr.env.example");
     expect(environment).toContain("BITBUCKET_WORKSPACE=");
     expect(environment).toContain("BITBUCKET_EMAIL=");
     expect(environment).toContain("BITBUCKET_API_TOKEN=");
     expect(environment).toContain("BITBUCKET_PERMISSION_API_TOKEN=");
+    expect(environment).toContain("BITBUCKET_BASE_URL=");
+    expect(environment).toContain("BITBUCKET_PROJECT_KEY=");
+    expect(environment).toContain("BITBUCKET_TOKEN=");
+    expect(environment).toContain("BITBUCKET_USER=");
+    expect(environment).toContain("BITBUCKET_PERMISSION_TOKEN=");
     expect(environment).toContain("PIPR_WEBHOOK_SECRET=");
+    expect(result.created).toContain("bitbucket-pipelines.yml");
+    expect(pipeline).toContain("pipr host-run --host bitbucket --config-dir config/pipr");
+    expect(pipeline).toContain("name: Pipr review");
+    expect(pipeline).not.toContain(".pipr-runs");
   });
 
   it("rejects unsupported init adapters", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "pipr-init-"));
 
     await expect(initOfficialMinimalProject({ rootDir, adapters: ["unknown"] })).rejects.toThrow(
-      "Unsupported pipr init adapter 'unknown'. Supported adapters: github, gitlab, azure-devops, bitbucket",
+      "Unsupported pipr init adapter 'unknown'. Supported adapters: github, gitlab, azure-devops, bitbucket, gitea, forgejo, codeberg",
     );
     await expect(
       initOfficialMinimalProject({ rootDir, adapters: ["none", "github"] }),
     ).rejects.toThrow("Adapter 'none' cannot be mixed with other init adapters");
     await expect(initOfficialMinimalProject({ rootDir, adapters: [""] })).rejects.toThrow(
-      "Unsupported pipr init adapter ''. Supported adapters: github, gitlab, azure-devops",
+      "Unsupported pipr init adapter ''. Supported adapters: github, gitlab, azure-devops, bitbucket, gitea, forgejo, codeberg",
     );
   });
 

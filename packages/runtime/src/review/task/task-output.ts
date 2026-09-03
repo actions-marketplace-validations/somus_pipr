@@ -1,23 +1,23 @@
 import type {
   CheckHandle,
   CommentValue,
+  DroppedReviewFinding,
   PathFilter,
+  PiprRunSummary,
   PriorReview,
   ReviewFinding,
 } from "@usepipr/sdk";
 import { z } from "zod";
+import { summarizeDiffContextCoverage } from "../../pi/diff-context-coverage.js";
+import type { PriorReviewState, ReviewStats } from "../../publication/types.js";
 import type { ReviewResult } from "../../types.js";
-import type { PiRunStats } from "../agent/review-run.js";
+import type { PiRunStats } from "../agent/review-run-types.js";
 import { mainCommentTitles } from "../comment-branding.js";
-import { reviewFindingSchema } from "../contract.js";
-import { parseGeneratedMainCommentEnvelope } from "../main-comment-envelope.js";
-import type { PriorReviewState } from "../prior-state.js";
 import {
-  maxReviewStatsModels,
-  type ReviewStats,
-  sanitizeReviewStatsModel,
-} from "../review-stats.js";
-
+  type GeneratedMainCommentEnvelope,
+  parseGeneratedMainCommentEnvelope,
+} from "../main-comment-envelope.js";
+import { maxReviewStatsModels, sanitizeReviewStatsModel } from "../review-stats.js";
 export type RuntimeCheckConclusion = "success" | "failure" | "neutral";
 
 export type RuntimeTaskCheckResult = {
@@ -34,6 +34,7 @@ export type OutputState = {
   comment?: CommentContribution;
   commandResponse?: CommandResponseContribution;
   findings: FindingContribution[];
+  droppedFindings: DroppedReviewFinding[];
   findingScopes: WeakMap<readonly ReviewFinding[], PathFilter>;
   providerModels: string[];
   repairAttempted: boolean;
@@ -65,13 +66,23 @@ export type TaskRunResult = {
   error?: unknown;
 };
 
+const metadataBearingReviewFindingSchema = z.looseObject({
+  body: z.string().min(1),
+  path: z.string().min(1),
+  rangeId: z.string().min(1),
+  side: z.enum(["RIGHT", "LEFT"]),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  suggestedFix: z.string().min(1).optional(),
+});
+
 const agentInlineFindingsOutputSchema = z.custom<{
   inlineFindings: readonly ReviewFinding[];
 }>(
   (value) =>
     z
       .looseObject({
-        inlineFindings: z.array(reviewFindingSchema),
+        inlineFindings: z.array(metadataBearingReviewFindingSchema),
       })
       .safeParse(value).success,
 );
@@ -79,6 +90,7 @@ const agentInlineFindingsOutputSchema = z.custom<{
 export function createOutputState(): OutputState {
   return {
     findings: [],
+    droppedFindings: [],
     findingScopes: new WeakMap(),
     providerModels: [],
     repairAttempted: false,
@@ -91,6 +103,7 @@ export function mergeTaskOutputs(results: TaskRunResult[]): OutputState {
     mergeCommentContribution(merged, output.comment);
     mergeCommandResponseContribution(merged, output.commandResponse);
     merged.findings.push(...output.findings);
+    merged.droppedFindings.push(...output.droppedFindings);
     merged.providerModels.push(...output.providerModels);
     merged.repairAttempted ||= output.repairAttempted;
   }
@@ -105,6 +118,7 @@ export function reviewStatsForRuns(
     return undefined;
   }
   const usage = aggregateReviewUsage(runs);
+  const coverage = runs.map((run) => run.diffContextCoverage).filter((item) => item !== undefined);
   return {
     models: collectReviewModels(runs),
     agentRuns: runs.length,
@@ -113,6 +127,37 @@ export function reviewStatsForRuns(
     outputTokens: usage.outputTokens,
     costUsd: usage.costUsd,
     usageStatus: usage.status,
+    cacheReadTokens: usage.cacheReadTokens,
+    cacheWriteTokens: usage.cacheWriteTokens,
+    cacheUsageStatus: usage.cacheStatus,
+    ...(coverage.length > 0 ? { diffContextCoverage: summarizeDiffContextCoverage(coverage) } : {}),
+  };
+}
+
+export function runSummaryStatsFields(
+  stats: ReviewStats | undefined,
+): Pick<
+  PiprRunSummary,
+  | "agentRuns"
+  | "inputTokens"
+  | "outputTokens"
+  | "costUsd"
+  | "usageStatus"
+  | "cacheReadTokens"
+  | "cacheWriteTokens"
+  | "cacheUsageStatus"
+  | "diffContextCoverage"
+> {
+  return {
+    agentRuns: stats?.agentRuns ?? 0,
+    inputTokens: stats?.inputTokens ?? 0,
+    outputTokens: stats?.outputTokens ?? 0,
+    costUsd: stats?.costUsd ?? 0,
+    usageStatus: stats?.usageStatus ?? "unavailable",
+    cacheReadTokens: stats?.cacheReadTokens ?? 0,
+    cacheWriteTokens: stats?.cacheWriteTokens ?? 0,
+    cacheUsageStatus: stats?.cacheUsageStatus ?? "unavailable",
+    ...(stats?.diffContextCoverage ? { diffContextCoverage: stats.diffContextCoverage } : {}),
   };
 }
 
@@ -132,6 +177,18 @@ function aggregateReviewUsage(runs: PiRunStats[]): {
   outputTokens: number;
   costUsd: number;
   status: ReviewStats["usageStatus"];
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheStatus: NonNullable<ReviewStats["cacheUsageStatus"]>;
+} {
+  return { ...aggregateCoreUsage(runs), ...aggregateCacheUsage(runs) };
+}
+
+function aggregateCoreUsage(runs: PiRunStats[]): {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  status: ReviewStats["usageStatus"];
 } {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -139,9 +196,7 @@ function aggregateReviewUsage(runs: PiRunStats[]): {
   let reportedRuns = 0;
   let partialUsage = false;
   for (const run of runs) {
-    if (!run.usage) {
-      continue;
-    }
+    if (!run.usage) continue;
     reportedRuns += 1;
     const input = addReportedUsage(inputTokens, run.usage.inputTokens, Number.isSafeInteger);
     const output = addReportedUsage(outputTokens, run.usage.outputTokens, Number.isSafeInteger);
@@ -156,13 +211,67 @@ function aggregateReviewUsage(runs: PiRunStats[]): {
     inputTokens,
     outputTokens,
     costUsd,
-    status:
-      reportedRuns === 0
-        ? "unavailable"
-        : reportedRuns < runs.length || partialUsage
-          ? "partial"
-          : "complete",
+    status: aggregateUsageStatus(reportedRuns, runs.length, partialUsage),
   };
+}
+
+function aggregateCacheUsage(runs: PiRunStats[]): {
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheStatus: NonNullable<ReviewStats["cacheUsageStatus"]>;
+} {
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  let reportedRuns = 0;
+  let partialUsage = false;
+  for (const run of runs) {
+    if (!hasReportedCacheUsage(run)) continue;
+    const usage = run.usage;
+    reportedRuns += 1;
+    const cacheRead = addReportedUsage(
+      cacheReadTokens,
+      usage.cacheReadTokens,
+      Number.isSafeInteger,
+    );
+    const cacheWrite = addReportedUsage(
+      cacheWriteTokens,
+      usage.cacheWriteTokens,
+      Number.isSafeInteger,
+    );
+    cacheReadTokens = cacheRead.total;
+    cacheWriteTokens = cacheWrite.total;
+    partialUsage ||=
+      usage.cacheUsageStatus === "partial" || !cacheRead.complete || !cacheWrite.complete;
+  }
+  return {
+    cacheReadTokens,
+    cacheWriteTokens,
+    cacheStatus: aggregateUsageStatus(reportedRuns, runs.length, partialUsage),
+  };
+}
+
+function hasReportedCacheUsage(run: PiRunStats): run is PiRunStats & {
+  usage: PiRunStats["usage"] & {
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    cacheUsageStatus: "complete" | "partial";
+  };
+} {
+  return (
+    run.usage?.cacheReadTokens !== undefined &&
+    run.usage.cacheWriteTokens !== undefined &&
+    run.usage.cacheUsageStatus !== undefined &&
+    run.usage.cacheUsageStatus !== "unavailable"
+  );
+}
+
+function aggregateUsageStatus(
+  reported: number,
+  total: number,
+  partial: boolean,
+): "complete" | "partial" | "unavailable" {
+  if (reported === 0) return "unavailable";
+  return reported < total || partial ? "partial" : "complete";
 }
 
 function addReportedUsage(
@@ -272,6 +381,9 @@ export function collectComment(state: OutputState, value: CommentValue, taskName
   if (typeof value === "string") {
     return;
   }
+  if (value.main === undefined && value.inlineFindings === undefined) {
+    throw new Error("ctx.comment(...) requires main or inlineFindings");
+  }
   collectInlineFindings(state, value.inlineFindings);
 }
 
@@ -290,8 +402,9 @@ export function priorReviewForTask(
   priorMainComment: string | undefined,
   priorReviewState: PriorReviewState | undefined,
 ): PriorReview {
+  const visibleMain = priorMainComment ? visibleMainComment(priorMainComment) : undefined;
   return {
-    ...(priorMainComment ? { main: visibleMainComment(priorMainComment) } : {}),
+    ...(visibleMain ? { main: visibleMain } : {}),
     ...(priorReviewState ? { reviewedHeadSha: priorReviewState.reviewedHeadSha } : {}),
     inlineFindings:
       priorReviewState?.findings.map((finding) => ({
@@ -309,19 +422,7 @@ export function priorReviewForTask(
 function visibleMainComment(body: string): string {
   const sourceLines = body.split("\n");
   const envelope = parseGeneratedMainCommentEnvelope(sourceLines);
-  const lines = sourceLines.filter((_line, index) => {
-    return (
-      !(
-        envelope.statsRange &&
-        index >= envelope.statsRange.start &&
-        index <= envelope.statsRange.end
-      ) &&
-      index !== envelope.mainMarkerIndex &&
-      index !== envelope.headerMarkerIndex &&
-      index !== envelope.statsMarkerIndex &&
-      index !== envelope.footerIndex
-    );
-  });
+  const lines = sourceLines.filter((_line, index) => !generatedEnvelopeOwnsLine(envelope, index));
   while (lines[0] === "") {
     lines.shift();
   }
@@ -334,6 +435,22 @@ function visibleMainComment(body: string): string {
   return lines.join("\n").trim();
 }
 
+function generatedEnvelopeOwnsLine(envelope: GeneratedMainCommentEnvelope, index: number): boolean {
+  if (
+    [
+      envelope.mainMarkerIndex,
+      envelope.headerMarkerIndex,
+      envelope.statsMarkerIndex,
+      envelope.footerIndex,
+    ].includes(index)
+  ) {
+    return true;
+  }
+  return [envelope.statsRange, envelope.progressRange, envelope.resultRange].some(
+    (range) => range !== undefined && index >= range.start && index <= range.end,
+  );
+}
+
 function collectInlineFindings(
   state: OutputState,
   findings: readonly ReviewFinding[] | undefined,
@@ -344,10 +461,34 @@ function collectInlineFindings(
   const arrayScope = state.findingScopes.get(findings);
   state.findings.push(
     ...findings.map((finding) => ({
-      finding,
+      finding: canonicalFindingProjection(finding),
       paths: arrayScope,
     })),
   );
+}
+
+export function recordDroppedFindings(
+  state: OutputState,
+  droppedFindings: readonly DroppedReviewFinding[],
+): void {
+  state.droppedFindings.push(
+    ...droppedFindings.map(({ finding, reason }) => ({
+      finding: canonicalFindingProjection(finding),
+      reason,
+    })),
+  );
+}
+
+function canonicalFindingProjection(finding: ReviewFinding): ReviewFinding {
+  return {
+    body: finding.body,
+    path: finding.path,
+    rangeId: finding.rangeId,
+    side: finding.side,
+    startLine: finding.startLine,
+    endLine: finding.endLine,
+    ...(finding.suggestedFix === undefined ? {} : { suggestedFix: finding.suggestedFix }),
+  };
 }
 
 export function trackResultFindingScope(

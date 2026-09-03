@@ -1,21 +1,23 @@
 import { githubCoordinates } from "../../shared/github.js";
+import { createPublicationWorkflow } from "../publication/workflow.js";
 import type { CodeHostAdapter } from "../types.js";
-import { createGitHubCommandClient, type GitHubCommandClient } from "./command.js";
+import {
+  createGitHubCommandClient,
+  createGitHubPublicationClient,
+  type GitHubCommandClient,
+  type GitHubPublicationClient,
+} from "./client.js";
 import {
   loadGitHubIssueCommentEventContext,
   loadGitHubPullRequestEventContext,
   loadGitHubReviewCommentReplyEvent,
 } from "./event.js";
 import {
-  createGitHubPublicationClient,
-  type GitHubPublicationClient,
   loadGitHubInlineThreadContexts,
   loadGitHubPriorMainComment,
   loadGitHubPriorReviewState,
-  publishGitHubCommandResponse,
-  publishGitHubPublicationPlan,
-  publishGitHubThreadActions,
 } from "./publication.js";
+import { createGitHubPublicationDriver } from "./publication-driver.js";
 import { ensureGitHubHeadCheckout, ensureGitHubWorkspaceSafeDirectory } from "./workspace.js";
 
 export type GitHubHostAdapterOptions = {
@@ -28,6 +30,7 @@ export function createGitHubHostAdapter(options: GitHubHostAdapterOptions = {}):
   const env = options.env ?? process.env;
   const commandClient = options.commandClient ?? createGitHubCommandClient(env);
   const publicationClient = options.publicationClient ?? createGitHubPublicationClient(env);
+  const publication = createPublicationWorkflow(createGitHubPublicationDriver(publicationClient));
 
   return {
     id: "github",
@@ -87,32 +90,7 @@ export function createGitHubHostAdapter(options: GitHubHostAdapterOptions = {}):
         return commandClient.getRepositoryPermission({ repository: change.repository, actor });
       },
     },
-    publication: {
-      publish(options) {
-        return publishGitHubPublicationPlan({
-          client: publicationClient,
-          change: options.change,
-          plan: options.plan,
-        });
-      },
-      publishCommandResponse(options) {
-        return publishGitHubCommandResponse({
-          client: publicationClient,
-          change: options.change,
-          sourceCommentId: Number(options.sourceCommentId),
-          commandName: options.commandName,
-          body: options.body,
-        });
-      },
-      publishThreadActions(options) {
-        return publishGitHubThreadActions({
-          client: publicationClient,
-          change: options.change,
-          actions: options.actions,
-          reviewedHeadSha: options.reviewedHeadSha,
-        });
-      },
-    },
+    publication,
     comments: {
       loadPriorReviewState(options) {
         return loadGitHubPriorReviewState({

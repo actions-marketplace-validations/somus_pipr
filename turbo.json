@@ -3,6 +3,7 @@
   "remoteCache": {
     "signature": true
   },
+  "globalDependencies": ["biome.json", "mise.toml", "tsconfig.base.json", "tsconfig.json"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -39,12 +40,6 @@
       "outputs": []
     },
     "//#check:conventional-commit:root": {
-      "outputs": []
-    },
-    "//#check:scripts:root": {
-      "outputs": []
-    },
-    "//#check:runtime-test-split:root": {
       "outputs": []
     },
     "//#typecheck:root": {

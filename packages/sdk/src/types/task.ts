@@ -1,8 +1,8 @@
+import type { PiprRunContext } from "../result.js";
 import type { ReviewFinding, ReviewResult } from "../review-contract.js";
 import type {
   Agent,
   AgentDefinition,
-  AgentPromptContext,
   AgentTool,
   BuiltinSchemaCatalog,
   BuiltinToolCatalog,
@@ -31,8 +31,12 @@ import type { JsonSchemaDefinition, Schema, SchemaDefinition } from "./schema.js
 export type CommentValue =
   | Markdown
   | {
-      main?: Markdown;
+      main: Markdown;
       inlineFindings?: readonly ReviewFinding[];
+    }
+  | {
+      main?: never;
+      inlineFindings: readonly ReviewFinding[];
     };
 
 /** Prior inline finding persisted by earlier pipr review state. */
@@ -51,6 +55,27 @@ export type PriorReview = {
   main?: Markdown;
   reviewedHeadSha?: string;
   inlineFindings: readonly PriorInlineFinding[];
+};
+
+/** Optional path scope applied while validating review findings. */
+export type ValidateFindingsOptions = {
+  paths?: PathFilter;
+};
+
+type ValidatedReviewFinding<T extends ReviewFinding> = T extends unknown
+  ? Omit<T, "rangeId"> & Pick<ReviewFinding, "rangeId">
+  : never;
+
+/** One review finding rejected by runtime validation. */
+export type DroppedReviewFinding<T extends ReviewFinding = ReviewFinding> = {
+  finding: ValidatedReviewFinding<T>;
+  reason: string;
+};
+
+/** Findings accepted and rejected by runtime validation. */
+export type ValidatedReviewFindings<T extends ReviewFinding = ReviewFinding> = {
+  validFindings: readonly ValidatedReviewFinding<T>[];
+  droppedFindings: readonly DroppedReviewFinding<T>[];
 };
 
 /** Function run by a task entrypoint. */
@@ -95,22 +120,11 @@ export type CommandRegistrationOptions<Input> = CommandOptions<Input> & {
   task: Task<Input>;
 };
 
-/** Options for creating a reusable reviewer agent. */
-export type ReviewerOptions = {
-  name?: string;
-  model: ModelProfile;
-  fallbacks?: readonly ModelProfile[];
-  instructions: PromptSource;
-  prompt?: (
-    input: DefaultReviewInput,
-    context: AgentPromptContext,
-  ) => PromptSource | Promise<PromptSource>;
-  tools?: readonly AgentTool[];
-  timeout?: DurationInput;
+/** Role-specific policy for the two agents created by `pipr.review`. */
+export type ReviewInstructions = {
+  findings: PromptSource;
+  summary: PromptSource;
 };
-
-/** Reviewer agent that emits pipr's core review result. */
-export type Reviewer = Agent<DefaultReviewInput, ReviewResult>;
 
 /** Entrypoints created by `pipr.review`. */
 export type ReviewEntrypoints = {
@@ -141,6 +155,10 @@ export const defaultReviewEntrypoints = {
 
 type ReviewRecipeEntrypointOptions = {
   id: string;
+  model: ModelProfile;
+  fallbacks?: readonly ModelProfile[];
+  instructions: ReviewInstructions;
+  tools?: readonly AgentTool[];
   entrypoints?: ReviewEntrypoints;
   comment?:
     | CommentValue
@@ -154,9 +172,7 @@ type ReviewRecipeEntrypointOptions = {
 };
 
 /** Options for `pipr.review`, pipr's default review recipe. */
-export type ReviewRecipeOptions =
-  | (ReviewRecipeEntrypointOptions & { reviewer: Reviewer })
-  | (ReviewRecipeEntrypointOptions & ReviewerOptions & { reviewer?: undefined });
+export type ReviewRecipeOptions = ReviewRecipeEntrypointOptions;
 
 /** Default input passed to a reviewer created by `pipr.review`. */
 export type DefaultReviewInput = {
@@ -164,9 +180,36 @@ export type DefaultReviewInput = {
   change: ChangeRequestInfo;
 };
 
+/** Bounded Diff Manifest projection passed to the summary agent created by `pipr.review`. */
+export type DefaultReviewSummaryManifest = {
+  baseSha: string;
+  headSha: string;
+  mergeBaseSha: string;
+  fileCount: number;
+  omittedFileCount: number;
+  files: readonly {
+    path: string;
+    previousPath?: string;
+    status: DiffManifest["files"][number]["status"];
+    language?: string;
+    additions: number;
+    deletions: number;
+    changedSymbols?: readonly string[];
+    excludedReason?: string;
+  }[];
+};
+
+/** Input passed to the summary agent created by `pipr.review`. */
+export type DefaultReviewSummaryInput = {
+  manifestSummary: DefaultReviewSummaryManifest;
+  change: ChangeRequestInfo;
+  inlineFindings: readonly ReviewFinding[];
+};
+
 /** Context passed to a custom review comment renderer. */
 export type ReviewCommentContext = {
   review: { id: string };
+  run: PiprRunContext;
   repository: RepositoryInfo;
   change: ChangeRequestContext;
   platform: PlatformInfo;
@@ -218,7 +261,6 @@ export type PiprBuilder = {
   model(options: ModelOptions): ModelProfile;
   agent<Input, Output>(definition: AgentDefinition<Input, Output>): Agent<Input, Output>;
   task<Input = void>(definition: TaskDefinition<Input>): Task<Input>;
-  reviewer(options: ReviewerOptions): Reviewer;
   review(options: ReviewRecipeOptions): void;
   config(options: PiprConfigOptions): void;
   command<Input = void>(options: CommandRegistrationOptions<Input>): void;
@@ -261,7 +303,6 @@ export type PlatformInfo = {
 export type ChangeRequestContext = ChangeRequestInfo & {
   diffManifest(options?: DiffManifestOptions): Promise<DiffManifest>;
   changedFiles(): Promise<readonly ChangedFile[]>;
-  currentHeadSha(): Promise<string>;
 };
 
 /** Runner for invoking Pi agents from tasks. */
@@ -275,6 +316,7 @@ export type PiRunner = {
       instructions?: PromptSource;
       timeout?: DurationInput;
       paths?: PathFilter;
+      maxShards?: number;
     },
   ): Promise<Output>;
 };
@@ -289,8 +331,8 @@ export type CommandContext = {
 
 /** Context object passed to task handlers. */
 export type TaskContext = {
-  /** Stable id for the selected Review Run, not the process attempt. */
-  readonly run: { id: string };
+  /** Stable identity and trigger for the selected Review Run, not the process attempt. */
+  readonly run: PiprRunContext;
   readonly repository: RepositoryInfo;
   readonly change: ChangeRequestContext;
   readonly platform: PlatformInfo;
@@ -299,6 +341,10 @@ export type TaskContext = {
   secret(secret: SecretRef): string;
   readonly review: {
     prior(): Promise<PriorReview>;
+    validateFindings<T extends ReviewFinding>(
+      findings: readonly T[],
+      options?: ValidateFindingsOptions,
+    ): ValidatedReviewFindings<T>;
   };
   readonly check: CheckHandle;
   comment(value: CommentValue): Promise<void>;

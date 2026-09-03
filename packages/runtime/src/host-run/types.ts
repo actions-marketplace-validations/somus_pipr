@@ -1,6 +1,9 @@
+import type { PiprRunSummary } from "@usepipr/sdk";
 import type { InspectRuntimePlan, LoadedRuntimeProject } from "../config/project.js";
 import type { CodeHostAdapter, CommandResponsePublicationResult } from "../hosts/types.js";
-import type { PublicationResult } from "../review/publication-result.js";
+import type { RunObserver } from "../observability/types.js";
+import type { PiRunner } from "../pi/types.js";
+import type { PublicationResult } from "../publication/types.js";
 import type { ReviewRuntimeResult } from "../review/task/task-runtime.js";
 import type { RuntimeLogSink } from "../shared/logging.js";
 import type { SecretRedactor } from "../shared/secret-redaction.js";
@@ -18,6 +21,10 @@ export type InitCommandOptions = RuntimeCommandOptions & {
   adapters?: readonly string[];
   recipe?: string;
   minimal?: boolean;
+  runtimeImage?: string;
+  checkoutAction?: string;
+  githubRunner?: string;
+  githubEnterpriseServer?: boolean;
 };
 
 export type DryRunCommandOptions = RuntimeCommandOptions & {
@@ -30,12 +37,22 @@ export type HostRunCommandOptions = RuntimeCommandOptions & {
   eventPath?: string;
   dryRun: boolean;
   logSink?: RuntimeLogSink;
+  onRunBundleFinalized?: (bundle: {
+    executionId: string;
+    directory: string;
+    kind: "review" | "command" | "verifier" | "startup";
+    outcome: "in-progress" | "succeeded" | "failed" | "partial";
+    repository?: import("@usepipr/sdk").RunBundleManifest["repository"];
+  }) => void | Promise<void>;
 };
 
+/** Injection bag accepted only at the host-run composition root. */
 export type HostRunCommandDependencyOptions = HostRunCommandOptions & {
   piExecutable?: string;
+  piRunner?: PiRunner;
   hostAdapter?: CodeHostAdapter;
   secretRedactor?: SecretRedactor;
+  runObserver?: RunObserver;
 };
 
 export type LocalReviewTaskLog = {
@@ -48,8 +65,12 @@ export type LocalReviewCommandOptions = RuntimeCommandOptions & {
   baseSha: string;
   headSha?: string;
   piExecutable?: string;
+  piAgentDir?: string;
+  piRunner?: PiRunner;
   logSink?: RuntimeLogSink;
   taskLog?: LocalReviewTaskLog;
+  traceDirectory?: string;
+  runObserver?: RunObserver;
 };
 
 export type DryRunCommandResult = {
@@ -96,6 +117,7 @@ export type HostRunCommandResult =
     }
   | {
       kind: "command-response";
+      run: PiprRunSummary;
       event: ChangeRequestEventContext;
       configSource: string;
       command: string;
@@ -106,6 +128,7 @@ export type HostRunCommandResult =
     }
   | {
       kind: "verifier";
+      run: PiprRunSummary;
       event: ChangeRequestEventContext;
       configSource: string;
       errors: string[];
@@ -125,6 +148,7 @@ export type TrustedReviewAndPublishResult =
     }
   | {
       kind: "command-response";
+      run: PiprRunSummary;
       response: {
         commandName: string;
         body: string;

@@ -1,6 +1,6 @@
 {
   "name": "pipr",
-  "version": "0.4.3",
+  "version": "0.8.0",
   "description": "Code-owned AI review across code hosts",
   "private": true,
   "type": "module",
@@ -13,16 +13,15 @@
     "url": "https://github.com/somus/pipr/issues"
   },
   "homepage": "https://github.com/somus/pipr#readme",
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "catalog": {
-    "@types/bun": "1.3.14",
-    "@types/node": "26.1.0",
-    "typescript": "6.0.3",
-    "zod": "4.4.3"
+    "@types/bun": "1.4.0",
+    "@types/node": "26.4.0",
+    "typescript": "7.0.2"
   },
   "scripts": {
     "build": "bun run build:packages",
@@ -39,11 +38,12 @@
     "format:check:docs-root": "biome format docs *.md --files-ignore-unknown=true --no-errors-on-unmatched",
     "format:check:packages": "turbo run format:check --filter='!@pipr/docs' //#format:check:root",
     "format:check:docs": "turbo run format:check --filter=@pipr/docs //#format:check:docs-root",
-    "fallow": "bun run fallow:packages && bun run fallow:docs",
+    "fallow": "bun run fallow:packages && bun run fallow:docs && bun run fallow:audit",
     "fallow:packages": "turbo run //#fallow:packages:root",
     "fallow:packages:root": "fallow --fail-on-issues --format compact --workspace '!@pipr/docs'",
     "fallow:docs": "turbo run //#fallow:docs:root",
     "fallow:docs:root": "fallow --fail-on-issues --format compact --workspace @pipr/docs",
+    "fallow:audit": "fallow audit --format compact",
     "build:release:cli": "bun packages/cli/build-release.ts",
     "check:release-artifacts": "bun scripts/verify-release-artifacts.ts",
     "check:npm-tarballs": "bun scripts/verify-npm-tarballs.ts",
@@ -51,29 +51,28 @@
     "docker:docs-e2e": "bun scripts/docs-docker-e2e.ts",
     "sync:release-lockfile": "bun scripts/sync-release-lockfile.ts",
     "hooks-install": "hk install --mise",
-    "check:runtime-test-split": "turbo run //#check:runtime-test-split:root",
-    "check:runtime-test-split:root": "bun scripts/check-runtime-test-split.ts",
     "check:release-metadata": "turbo run //#check:release-metadata:root",
     "check:release-metadata:root": "bun scripts/check-release-metadata.ts",
     "check:conventional-commit": "turbo run //#check:conventional-commit:root",
     "check:conventional-commit:root": "bun scripts/check-conventional-commit.ts --message \"chore: validate conventional commit check\"",
-    "check:scripts": "turbo run //#check:scripts:root",
-    "check:scripts:root": "bun test scripts/tests",
-    "check:quality": "turbo run //#check:release-metadata:root //#check:conventional-commit:root //#check:scripts:root //#check:runtime-test-split:root //#typecheck:root //#format:check:root //#fallow:packages:root",
+    "check:deps": "mise exec node@24.18.0 -- depcruise packages/runtime/src --config .dependency-cruiser.cjs --validate",
+    "check:quality": "turbo run //#check:release-metadata:root //#check:conventional-commit:root //#typecheck:root //#format:check:root //#fallow:packages:root",
     "check:quality:docs": "turbo run //#format:check:docs-root //#fallow:docs:root",
-    "check:packages": "bun run build:packages && turbo run lint typecheck test format:check --filter='!@pipr/docs' && bun run check:quality",
+    "check:packages": "turbo run build lint typecheck test format:check //#check:release-metadata:root //#check:conventional-commit:root //#typecheck:root //#format:check:root //#fallow:packages:root --filter='!@pipr/docs' && bun run check:deps",
     "check:docs": "turbo run lint typecheck:generated test:generated build:generated format:check --filter=@pipr/docs && bun run check:quality:docs",
-    "check": "bun run check:packages && bun run check:docs",
+    "check": "bun run check:packages && bun run check:docs && bun run fallow:audit",
     "check:actions": "bun run --cwd packages/e2e check:actions",
     "eval:prompts": "bun run --cwd packages/evals eval"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.3",
+    "@biomejs/biome": "2.5.10",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "fallow": "2.104.0",
-    "tsdown": "0.22.4",
-    "turbo": "2.10.4",
-    "typescript": "catalog:"
+    "dependency-cruiser": "18.2.0",
+    "fallow": "3.19.0",
+    "tsdown": "0.22.14",
+    "turbo": "2.10.12",
+    "typescript": "catalog:",
+    "typescript6": "npm:typescript@6.0.3"
   }
 }

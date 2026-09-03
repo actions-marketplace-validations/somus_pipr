@@ -240,6 +240,202 @@ describe("Bitbucket Cloud events", () => {
   });
 });
 
+describe("Bitbucket Data Center events", () => {
+  it("ignores draft pull request webhooks before loading the change", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "pipr-bitbucket-dc-event-"));
+    try {
+      const eventPath = path.join(directory, "event.json");
+      await Bun.write(
+        eventPath,
+        JSON.stringify({
+          ...dataCenterPayload,
+          pullRequest: { ...dataCenterPayload.pullRequest, draft: true },
+        }),
+      );
+
+      await expect(
+        parseBitbucketEvent({
+          eventPath,
+          env: {
+            BITBUCKET_BASE_URL: "https://bitbucket.example.com",
+            BITBUCKET_EVENT_KEY: "pr:opened",
+          },
+          workspace: "/workspace",
+          loadChangeRequest: () => {
+            throw new Error("draft pull requests must not load change data");
+          },
+        }),
+      ).resolves.toEqual({ kind: "ignored", reason: "pull request is a draft" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes pull request and comment webhooks", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "pipr-bitbucket-dc-event-"));
+    try {
+      const eventPath = path.join(directory, "event.json");
+      const options = {
+        eventPath,
+        env: {
+          BITBUCKET_BASE_URL: "https://bitbucket.example.com",
+          BITBUCKET_EVENT_KEY: "pr:from_ref_updated",
+        },
+        workspace: "/workspace",
+        loadChangeRequest: async (ref: {
+          workspace: string;
+          repository: string;
+          changeNumber: number;
+        }) => {
+          expect(ref).toEqual({ workspace: "PRJ", repository: "pipr", changeNumber: 7 });
+          return {
+            ...loaded,
+            repository: {
+              slug: "PRJ/pipr",
+              url: "https://bitbucket.example.com/projects/PRJ/repos/pipr/browse",
+            },
+            coordinates: {
+              provider: "bitbucket" as const,
+              workspace: "PRJ",
+              repository: "pipr",
+              repositoryUuid: "42",
+            },
+          };
+        },
+      };
+      await Bun.write(eventPath, JSON.stringify(dataCenterPayload));
+      await expect(parseBitbucketEvent(options)).resolves.toMatchObject({
+        kind: "change-request",
+        change: {
+          action: "updated",
+          platform: { id: "bitbucket", host: "https://bitbucket.example.com" },
+          repository: { slug: "PRJ/pipr" },
+        },
+      });
+      for (const [eventKey, action] of [
+        ["pr:opened", "opened"],
+        ["pr:modified", "updated"],
+      ] as const) {
+        await expect(
+          parseBitbucketEvent({
+            ...options,
+            env: { ...options.env, BITBUCKET_EVENT_KEY: eventKey },
+          }),
+        ).resolves.toMatchObject({ kind: "change-request", change: { action } });
+      }
+
+      await Bun.write(
+        eventPath,
+        JSON.stringify({
+          ...dataCenterPayload,
+          comment: { id: 11, text: "@pipr review", parent: { id: 10 } },
+        }),
+      );
+      await expect(
+        parseBitbucketEvent({
+          ...options,
+          env: { ...options.env, BITBUCKET_EVENT_KEY: "pr:comment:added" },
+        }),
+      ).resolves.toMatchObject({
+        kind: "review-comment-reply",
+        reply: {
+          actor: "developer",
+          body: "@pipr review",
+          parentCommentId: "10",
+          repository: {
+            slug: "PRJ/pipr",
+            url: "https://bitbucket.example.com/projects/PRJ/repos/pipr/browse",
+          },
+        },
+      });
+
+      await Bun.write(
+        eventPath,
+        JSON.stringify({
+          ...dataCenterPayload,
+          comment: { id: 12, text: "@pipr review" },
+        }),
+      );
+      await expect(
+        parseBitbucketEvent({
+          ...options,
+          env: { ...options.env, BITBUCKET_EVENT_KEY: "pr:comment:added" },
+        }),
+      ).resolves.toMatchObject({
+        kind: "command-comment",
+        comment: { commentId: "12", isChangeRequest: true },
+      });
+
+      await Bun.write(
+        eventPath,
+        JSON.stringify({
+          ...dataCenterPayload,
+          comment: { id: 13, text: "reply" },
+          commentParentId: 12,
+        }),
+      );
+      await expect(
+        parseBitbucketEvent({
+          ...options,
+          env: { ...options.env, BITBUCKET_EVENT_KEY: "pr:comment:added" },
+        }),
+      ).resolves.toMatchObject({
+        kind: "review-comment-reply",
+        reply: { commentId: "13", parentCommentId: "12" },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("maps terminal Data Center pull request events and rejects unsupported events", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "pipr-bitbucket-dc-event-"));
+    try {
+      const eventPath = path.join(directory, "event.json");
+      await Bun.write(eventPath, JSON.stringify(dataCenterPayload));
+      const options = {
+        eventPath,
+        workspace: "/workspace",
+        loadChangeRequest: async () => loaded,
+      };
+      for (const eventKey of ["pr:merged", "pr:declined"]) {
+        await expect(
+          parseBitbucketEvent({
+            ...options,
+            env: {
+              BITBUCKET_BASE_URL: "https://bitbucket.example.com",
+              BITBUCKET_EVENT_KEY: eventKey,
+            },
+          }),
+        ).resolves.toMatchObject({ kind: "change-request", change: { action: "closed" } });
+      }
+      await expect(
+        parseBitbucketEvent({
+          ...options,
+          env: {
+            BITBUCKET_BASE_URL: "https://bitbucket.example.com",
+            BITBUCKET_EVENT_KEY: "pr:deleted",
+          },
+          loadChangeRequest: () => {
+            throw new Error("deleted pull requests must not be loaded");
+          },
+        }),
+      ).resolves.toEqual({ kind: "ignored", reason: "pull request was deleted" });
+      await expect(
+        parseBitbucketEvent({
+          ...options,
+          env: {
+            BITBUCKET_BASE_URL: "https://bitbucket.example.com",
+            BITBUCKET_EVENT_KEY: "pr:reviewer:approved",
+          },
+        }),
+      ).rejects.toThrow("Unsupported Bitbucket Data Center event");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 const repository = {
   uuid: "{repo}",
   name: "repository",
@@ -262,4 +458,15 @@ const loaded = {
     base: { sha: "base", ref: "main" },
     head: { sha: "head", ref: "feature" },
   },
+};
+
+const dataCenterPayload = {
+  actor: { name: "developer", slug: "developer" },
+  repository: {
+    id: 42,
+    name: "pipr",
+    slug: "pipr",
+    project: { key: "PRJ" },
+  },
+  pullRequest: { id: 7, draft: false },
 };

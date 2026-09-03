@@ -30,7 +30,9 @@ describe("host-run adapter selection", () => {
   it("fails Azure DevOps selection before execution when coordinates are missing", () => {
     expect(() =>
       createHostRunAdapter({ host: "azure-devops", env: { AZURE_DEVOPS_TOKEN: "token" } }),
-    ).toThrow("AZURE_DEVOPS_ORGANIZATION is required");
+    ).toThrow(
+      "AZURE_DEVOPS_ORGANIZATION, AZURE_DEVOPS_COLLECTION_URL, or SYSTEM_COLLECTIONURI is required",
+    );
   });
 
   it("registers Bitbucket for explicit and native pipeline selection", () => {
@@ -44,5 +46,41 @@ describe("host-run adapter selection", () => {
     expect(createHostRunAdapter({ env: { ...env, BITBUCKET_BUILD_NUMBER: "1" } }).id).toBe(
       "bitbucket",
     );
+  });
+
+  it("registers the Gitea-compatible adapter family", () => {
+    expect(
+      createHostRunAdapter({
+        host: "gitea",
+        env: { GITEA_TOKEN: "token", GITEA_SERVER_URL: "https://gitea.example.com" },
+      }).id,
+    ).toBe("gitea");
+    expect(
+      createHostRunAdapter({
+        env: {
+          FORGEJO_ACTIONS: "true",
+          FORGEJO_TOKEN: "token",
+          FORGEJO_SERVER_URL: "https://forge.example.com",
+        },
+      }).id,
+    ).toBe("forgejo");
+    expect(
+      createHostRunAdapter({
+        env: {
+          FORGEJO_ACTIONS: "true",
+          FORGEJO_TOKEN: "token",
+          FORGEJO_SERVER_URL: "https://codeberg.org",
+        },
+      }).id,
+    ).toBe("codeberg");
+  });
+
+  it("fails Gitea-compatible selection before execution when credentials are missing", () => {
+    expect(() =>
+      createHostRunAdapter({
+        host: "forgejo",
+        env: { FORGEJO_SERVER_URL: "https://forge.example.com" },
+      }),
+    ).toThrow("FORGEJO_TOKEN is required");
   });
 });

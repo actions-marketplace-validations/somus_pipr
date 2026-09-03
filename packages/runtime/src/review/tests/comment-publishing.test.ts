@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import type { PriorReviewState } from "../../publication/types.js";
+import { runtimeVersion } from "../../shared/version.js";
 import type { DiffManifest, ValidatedReview } from "../../types.js";
-import { runtimeVersion } from "../comment.js";
 import { buildCommentPublishingPlan } from "../comment-publishing.js";
-import { extractPriorReviewState, type PriorReviewState } from "../prior-state.js";
+import { extractPriorReviewState } from "../prior-state.js";
 
 const event = {
   change: {
@@ -118,6 +119,66 @@ describe("buildCommentPublishingPlan", () => {
         ?.findings,
     ).toHaveLength(50);
     expect(publishing.publicationPlan.mainComment).toContain("Review completed.");
+  });
+
+  it("lists every workflow run contributing to accumulated review stats", () => {
+    const stats = {
+      models: ["deepseek-v4-pro"],
+      agentRuns: 2,
+      durationMs: 214_633,
+      inputTokens: 100,
+      outputTokens: 10,
+      costUsd: 0.001,
+      usageStatus: "complete" as const,
+    };
+    const first = buildCommentPublishingPlan({
+      event,
+      main: "First review.",
+      validated: { ...validated, validFindings: [] },
+      manifest,
+      metadata: {
+        ...metadata({ validFindings: 0 }),
+        stats,
+        workflowUrl: "https://github.com/acme/repo/actions/runs/101",
+      },
+    });
+    const second = buildCommentPublishingPlan({
+      event,
+      main: "Second review.",
+      validated: { ...validated, validFindings: [] },
+      manifest,
+      priorReviewState: first.publicationPlan.reviewState,
+      metadata: {
+        ...metadata({ validFindings: 0 }),
+        stats,
+        workflowUrl: "https://github.com/acme/repo/actions/runs/102",
+      },
+    });
+    const third = buildCommentPublishingPlan({
+      event,
+      main: "Third review.",
+      validated: { ...validated, validFindings: [] },
+      manifest,
+      priorReviewState: second.publicationPlan.reviewState,
+      metadata: {
+        ...metadata({ validFindings: 0 }),
+        stats: { ...stats, durationMs: 214_634 },
+        workflowUrl: "https://github.com/acme/repo/actions/runs/103",
+      },
+    });
+
+    expect(third.publicationPlan.mainComment).toContain(
+      "<summary>📊 3 workflow runs completed: 10m 43.9s combined</summary>",
+    );
+    expect(third.publicationPlan.mainComment).toContain("| Combined runtime | 10m 43.9s |");
+    expect(third.publicationPlan.mainComment).toContain(
+      "| Workflow runs | [Run 1](<https://github.com/acme/repo/actions/runs/101>), [Run 2](<https://github.com/acme/repo/actions/runs/102>), [Run 3](<https://github.com/acme/repo/actions/runs/103>) |",
+    );
+    expect(third.publicationPlan.reviewState.workflowUrls).toEqual([
+      "https://github.com/acme/repo/actions/runs/101",
+      "https://github.com/acme/repo/actions/runs/102",
+      "https://github.com/acme/repo/actions/runs/103",
+    ]);
   });
 
   it("supports the maximum stored finding limit", () => {

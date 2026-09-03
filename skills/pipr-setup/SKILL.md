@@ -47,7 +47,7 @@ Combine questions so the interview stays short.
 
 - Existing-file handling: config directory, selected adapter files, and whether existing Pipr files may be edited. Never use `pipr init --force` without explicit approval.
 - Recipe or review goal: general review, bugs, security, quality gate, dependency risk, PR hygiene, diagnostics, briefing, changelog, interactive ask, CI triage, multi-agent review, or durable memory tools.
-- Provider policy: GitHub, GitLab, Azure DevOps, Bitbucket, or no generated adapter files; model and code-host secret names; fallback model; and whether local runs should require provider env vars.
+- Provider policy: GitHub.com or GitHub Enterprise Server, GitLab.com or GitLab Self-Managed, Azure DevOps Services or Server, Bitbucket, Gitea, Forgejo, Codeberg, or no generated adapter files; model and code-host secret names; fallback model; and whether local runs should require provider env vars.
 - Trigger policy: automatic change request actions, `@pipr` commands, command permissions, local review behavior, and command-only workflows.
 - Publication policy: inline comment cap, check runs, aggregate checks, required gates, auto-resolve behavior, and who may trigger verifier replies.
 - Repo policy: path include/exclude scopes, generated or lockfile rules, test and docs expectations, package manager quirks, security-sensitive areas, and release-note conventions.
@@ -63,6 +63,7 @@ Before I initialize Pipr, choose the setup policy:
 2. Model: use Pipr default DeepSeek, or specify provider/model/secret env var names.
 3. Triggers and publishing: automatic PR review plus @pipr review with capped inline comments, command-only, or merge-gate checks.
 4. Code host and existing files: choose github, gitlab, azure-devops, bitbucket,
+   gitea, forgejo, codeberg,
    or no adapter files; then choose whether to edit existing Pipr files, create new files only, or approve replacement.
 ```
 
@@ -75,7 +76,8 @@ Read [recipes.md](references/recipes.md) before selecting a starter recipe. Read
 For new setups:
 
 - Choose the smallest matching recipe and run `pipr init --recipe <id> --adapters <adapter-list>` when the user selected an adapter. Omit `--adapters` only for the default GitHub setup.
-- Use `github` for `.github/workflows/pipr.yml`, `gitlab` for `.gitlab-ci.yml`, and `azure-devops` or `bitbucket` for trusted-webhook environment templates. Use `--adapters none` only when the user does not want generated adapter files.
+- For GitHub Enterprise Server, add `--github-enterprise-server`, optionally override its `[self-hosted, linux]` selection with `--github-runner <label>`, and use `--runtime-image` or `--checkout-action` when the runner requires internal mirrors.
+- Use `github` for `.github/workflows/pipr.yml`, `gitlab` for `.gitlab-ci.yml`, `gitea` for `.gitea/workflows/pipr.yml`, and `forgejo` or `codeberg` for `.forgejo/workflows/pipr.yml`. Azure DevOps, Bitbucket, and every Gitea-compatible adapter also generate trusted-webhook environment templates. Azure DevOps Server users must replace the generated Services-only `ubuntu-latest` pool with a self-hosted agent pool. Use `--adapters none` only when the user does not want generated adapter files.
 - Use `--minimal` only when the user chose a single-file config or Bun cannot be installed.
 
 For existing setups:
@@ -87,7 +89,7 @@ While customizing:
 
 - Keep config load synchronous. Runtime work belongs inside `pipr.task(...)`.
 - Use `pipr.secret({ name })`; never write raw secret values.
-- Prefer `pipr.review(...)` until the interview requires multiple Pi calls, command input, custom schemas, plugin tools, explicit checks, or main-comment-only output.
+- Prefer `pipr.review(...)` for the built-in findings-plus-summary flow. Use custom agents and tasks for custom prompts, additional Pi calls, command input, custom schemas, plugin tools, explicit checks, or main-comment-only output.
 - For custom tasks, pass `{ manifest }` to `ctx.pi.run(...)`; do not interpolate the Diff Manifest into prompts yourself.
 - Core already adds bounded change request metadata and schema-aware `suggestedFix` rules to agent prompts. Do not duplicate them in `instructions` or prompt input.
 - Emit exactly one final output from each selected task: `ctx.comment(...)` or `ctx.command.reply(...)`.

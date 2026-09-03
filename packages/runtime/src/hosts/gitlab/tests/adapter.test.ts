@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { buildPublicationPlan, type InlinePublicationItem } from "../../../review/comment.js";
+import type { InlinePublicationItem } from "../../../publication/types.js";
+import { buildPublicationPlan } from "../../../review/comment.js";
 import { buildPriorReviewState, renderInlineFindingMarker } from "../../../review/prior-state.js";
 import type { ChangeRequestEventContext } from "../../../types.js";
 import {
@@ -221,6 +222,14 @@ describe("GitLab host adapter", () => {
 
 defineCodeHostAdapterConformanceSuite({
   name: "GitLab",
+  capabilities: {
+    commandComments: true,
+    reviewCommentReplies: true,
+    threadResolution: true,
+    multilineInlineComments: true,
+    suggestedChanges: true,
+    statuses: true,
+  },
   createHarness: createGitLabConformanceHarness,
 });
 
@@ -536,6 +545,14 @@ async function createGitLabConformanceHarness(): Promise<CodeHostAdapterConforma
           sha: "new-head",
           diff_refs: { ...client.mergeRequest.diff_refs, head_sha: "new-head" },
         };
+      };
+    },
+    supersedeProgressDuringPreflight(body) {
+      client.afterListNotes = () => {
+        client.afterListNotes = undefined;
+        client.notes = client.notes.map((note) =>
+          note.body.includes("pipr:main-comment") ? { ...note, body } : note,
+        );
       };
     },
     failNextInline() {

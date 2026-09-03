@@ -2,18 +2,19 @@ import type { OfficialInitRecipe } from "./types.js";
 
 export const qualityGateRecipe = {
   id: "quality-gate",
+  requiresChecksPermission: true,
   title: "Quality Gate",
   description: "Required review check that fails on blocking correctness and test risks.",
   sourceTools: ["SonarQube", "Snyk"],
   configTs: `import { definePipr, z } from "@usepipr/sdk";
-import type { CommentableRange, DiffManifest, ReviewFinding } from "@usepipr/sdk";
+import type { ReviewFinding } from "@usepipr/sdk";
 
 export default definePipr((pipr) => {
   const model = pipr.model({
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   pipr.config({
@@ -86,8 +87,9 @@ export default definePipr((pipr) => {
     async run(ctx) {
       const manifest = await ctx.change.diffManifest({ compressed: true });
       const result = await ctx.pi.run(reviewer, { manifest });
-      const commentableBlockers = filterCommentableBlockers(result.blockers, manifest);
-      const droppedBlockerCount = result.blockers.length - commentableBlockers.length;
+      const { validFindings: commentableBlockers, droppedFindings } =
+        ctx.review.validateFindings(result.blockers);
+      const droppedBlockerCount = droppedFindings.length;
       const inlineFindings: ReviewFinding[] = commentableBlockers.map((blocker) => {
         const category = blocker.category
           .replaceAll("-", " ")
@@ -110,22 +112,28 @@ export default definePipr((pipr) => {
         ctx.check.pass("No blocking quality issues found.");
       }
 
-      await ctx.comment({
-        main: [
-          statusTable(commentableBlockers),
+      const sections = [
+        qualityGateCallout(commentableBlockers),
+        "",
+        "## 🧭 Summary",
+        "",
+        result.summary,
+      ];
+      if (droppedBlockerCount > 0) {
+        sections.push("", droppedBlockersNote(droppedBlockerCount));
+      }
+      if (commentableBlockers.length > 0) {
+        sections.push(
           "",
-          droppedBlockersNote(droppedBlockerCount),
-          "",
-          result.summary,
-          "",
-          "## Blocking Findings",
+          "## ⚠️ Blocking Findings",
           "",
           blockersTable(commentableBlockers),
           "",
-          "## Category Breakdown",
-          "",
-          categoryBreakdownTable(commentableBlockers),
-        ].join("\\n"),
+          categoryBreakdownBlock(commentableBlockers),
+        );
+      }
+      await ctx.comment({
+        main: sections.join("\\n"),
         inlineFindings,
       });
     },
@@ -135,72 +143,15 @@ export default definePipr((pipr) => {
   pipr.command({ pattern: "@pipr quality", permission: "write", task });
 });
 
-type FindingAnchor = Pick<ReviewFinding, "path" | "rangeId" | "side" | "startLine" | "endLine">;
-
-function filterCommentableBlockers(
-  blockers: QualityBlocker[],
-  manifest: DiffManifest,
-): QualityBlocker[] {
-  const seen = new Set<string>();
-  return blockers.filter((blocker) => {
-    if (!commentableRangeForFinding(blocker, manifest)) {
-      return false;
-    }
-    const key = [
-      blocker.path,
-      blocker.rangeId,
-      blocker.side,
-      blocker.startLine,
-      blocker.endLine,
-      blocker.body,
-    ].join("\\n");
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
-
-function commentableRangeForFinding(
-  finding: FindingAnchor,
-  manifest: DiffManifest,
-): CommentableRange | undefined {
-  for (const file of manifest.files) {
-    const range = file.commentableRanges.find((candidate) => candidate.id === finding.rangeId);
-    if (!range) {
-      continue;
-    }
-    return finding.rangeId === range.id &&
-      finding.path === range.path &&
-      finding.side === range.side &&
-      finding.startLine <= finding.endLine &&
-      finding.startLine >= range.startLine &&
-      finding.endLine <= range.endLine
-      ? range
-      : undefined;
+function qualityGateCallout(blockers: QualityBlocker[]): string {
+  if (blockers.length === 0) {
+    return "> ✅ **Quality gate passed:** No blocking findings.";
   }
-  return undefined;
-}
-
-function statusTable(blockers: QualityBlocker[]): string {
-  return [
-    "| Status | Blocking findings | Categories |",
-    "| --- | ---: | --- |",
-    \`| \${blockers.length === 0 ? "Pass" : "Fail"} | \${blockers.length} | \${categorySummary(
-      blockers,
-    )} |\`,
-  ].join("\\n");
+  const noun = blockers.length === 1 ? "finding requires" : "findings require";
+  return \`> ❌ **Quality gate failed:** \${blockers.length} blocking \${noun} attention.\`;
 }
 
 function blockersTable(blockers: QualityBlocker[]): string {
-  if (blockers.length === 0) {
-    return [
-      "| Category | Title | Impact |",
-      "| --- | --- | --- |",
-      "| - | No blocking findings. | - |",
-    ].join("\\n");
-  }
   return [
     "| Category | Title | Impact |",
     "| --- | --- | --- |",
@@ -236,16 +187,12 @@ function droppedBlockersNote(count: number): string {
   ].join("");
 }
 
-function categoryBreakdownTable(blockers: QualityBlocker[]): string {
+function categoryBreakdownBlock(blockers: QualityBlocker[]): string {
   const counts = categoryCounts(blockers);
-  if (counts.length === 0) {
-    return [
-      "| Category | Count |",
-      "| --- | ---: |",
-      "| - | 0 |",
-    ].join("\\n");
-  }
   return [
+    "<details>",
+    "<summary>Category breakdown</summary>",
+    "",
     "| Category | Count |",
     "| --- | ---: |",
     ...counts.map(([category, count]) => {
@@ -254,22 +201,9 @@ function categoryBreakdownTable(blockers: QualityBlocker[]): string {
         .replace(/^./, (char) => char.toUpperCase());
       return \`| \${categoryLabel} | \${count} |\`;
     }),
+    "",
+    "</details>",
   ].join("\\n");
-}
-
-function categorySummary(blockers: QualityBlocker[]): string {
-  const counts = categoryCounts(blockers);
-  if (counts.length === 0) {
-    return "None";
-  }
-  return counts
-    .map(([category, count]) => {
-      const categoryLabel = category
-        .replaceAll("-", " ")
-        .replace(/^./, (char) => char.toUpperCase());
-      return \`\${categoryLabel} (\${count})\`;
-    })
-    .join(", ");
 }
 
 function categoryCounts(blockers: QualityBlocker[]): Array<[string, number]> {
